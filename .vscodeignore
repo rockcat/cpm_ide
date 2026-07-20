@@ -5,3 +5,8 @@
 test/
 node_modules/
 *.vsix
+examples/
+src/test/
+CPM IDE Specification.md
+.claude/
+.vscode/

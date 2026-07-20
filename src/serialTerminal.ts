@@ -192,7 +192,7 @@ export class SerialTerminal {
 			// wherever the last scan/transfer happened to leave the CCP.
 			if (driveBefore && driveBefore !== this.currentDrive) {
 				this.writeRaw(`${driveBefore}:\r`);
-				await this.waitForIdle(150, 800);
+				await this.waitForIdle(300, 2000);
 				this._onActivity.fire(`Restored current drive to ${driveBefore}:`);
 			}
 			this.hiddenCommandInProgress = false;
@@ -381,9 +381,13 @@ export class SerialTerminal {
 				// receive buffer, where a later "key pending?" check (e.g.
 				// DIR's abort-on-keypress) can misread it as a keypress.
 				this.writeRaw(`${driveLetter}:\r`);
-				// Drive select only echoes a short prompt, so a non-responding
-				// drive shouldn't cost the full multi-second idle timeout.
-				await this.waitForIdle(150, 800);
+				// Selecting a drive can involve real disk I/O (mounting,
+				// directory login) on the device, so this needs real margin -
+				// too tight a window bails out before the response even
+				// starts, misreading a slow-but-present drive as absent and
+				// firing the next command while the device is still busy
+				// with this one.
+				await this.waitForIdle(300, 2000);
 				const response = this.inputBuffer.slice(start);
 
 				if (this.promptRegex.test(response)) {
@@ -409,7 +413,8 @@ export class SerialTerminal {
 
 		this._onActivity.fire(`Listing files on ${drive}:`);
 		this.writeRaw(`${drive}:\r`);
-		await this.waitForIdle(150, 800);
+		// See scanDrives() for why this needs real margin, not a tight window.
+		await this.waitForIdle(300, 2000);
 
 		const start = this.inputBuffer.length;
 		this.writeRaw('DIR\r');

@@ -3,10 +3,20 @@
   "displayName": "CP/M IDE",
   "description": "VS Code extension for CP/M application development with serial terminal and file transfer",
   "version": "0.1.0",
-  "publisher": "cpm-ide",
+  "publisher": "rockcat",
   "engines": {
     "vscode": "^1.80.0"
   },
+    "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rockcat/cpm-ide.git"
+  },
+  "author": "rockcat",
+  "license": "SEE LICENSE IN LICENSE.txt",
+  "bugs": {
+    "url": "https://github.com/rockcat/cpm-ide/issues"
+  },
+  "homepage": "https://github.com/rockcat/cpm-ide#readme",
   "categories": [
     "Programming Languages",
     "Debuggers",
@@ -224,7 +234,8 @@
     "watch": "tsc -watch -p ./",
     "pretest": "npm run compile && npm run lint",
     "lint": "eslint src --ext ts",
-    "test": "node ./out/test/runTest.js"
+    "test": "node ./out/test/runTest.js",
+    "publish": "npx @vscode/vsce login rockcat && npx @vscode/vsce publish"
   },
   "devDependencies": {
     "@electron/rebuild": "^4.2.0",

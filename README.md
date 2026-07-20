@@ -30,11 +30,20 @@ A VS Code extension for CP/M application development with integrated serial term
 
 ## Installation
 
+### Local development
+
 1. Clone or download this repository
 2. Run `npm install` to install dependencies
 3. Run `npm run compile` to build the extension
-4. Package the extension: `vsce package`
-5. Install in VS Code or use `F5` to debug
+4. Open the folder in VS Code and press `F5` to launch the Extension Development Host
+
+### Package or publish
+
+1. Make sure the `publisher` value in `package.json` matches your Visual Studio Marketplace publisher name
+2. Bump the extension version in `package.json`
+3. Package a `.vsix` file with `npx @vscode/vsce package`
+4. Publish to the Marketplace with `npx @vscode/vsce publish patch`
+5. Use `minor` or `major` instead of `patch` when you want a larger version bump
 
 ## Configuration
 
@@ -118,7 +127,7 @@ All directory operations and file transfers are performed transparently, with co
 ## Requirements
 
 - VS Code 1.80.0 or later
-- Node.js 14+ for development
+- Node.js 18+ recommended for development and publishing
 - Serial port connection to CP/M device
 - Z80 assembler (z80asm, TASM, etc.) for assembly builds
 - C compiler (compatible with CP/M targets) for C builds
@@ -145,8 +154,23 @@ npm run watch
 npm run test
 
 # Create .vsix package
-npx vsce package
+npx @vscode/vsce package
+
+# Publish to the Marketplace
+npx @vscode/vsce publish patch
 ```
+
+## Publishing
+
+This extension is configured in [package.json](package.json) with the name `cpm-ide` and publisher `cpm-ide`, so the Marketplace identifier is `cpm-ide.cpm-ide` unless you change one of those fields.
+
+Before publishing, run the full validation flow:
+
+1. `npm install`
+2. `npm run compile`
+3. `npm run test`
+4. `npx @vscode/vsce package`
+5. `npx @vscode/vsce publish patch`
 
 ## License
 
