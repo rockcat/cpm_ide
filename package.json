@@ -1,0 +1,246 @@
+{
+  "name": "cpm-ide",
+  "displayName": "CP/M IDE",
+  "description": "VS Code extension for CP/M application development with serial terminal and file transfer",
+  "version": "0.1.0",
+  "publisher": "cpm-ide",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Debuggers",
+    "Other"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onLanguage:asm-z80",
+    "onCommand:cpm-ide.openSerialTerminal",
+    "onView:cpmFilesExplorer"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "asm-z80",
+        "aliases": [
+          "Z80 Assembly",
+          "z80"
+        ],
+        "extensions": [
+          ".asm",
+          ".s",
+          ".z80"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "asm-z80",
+        "scopeName": "source.asm.z80",
+        "path": "./syntaxes/z80.tmLanguage.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "cpm-ide.openSerialTerminal",
+        "title": "CP/M IDE: Open CP/M Serial Terminal"
+      },
+      {
+        "command": "cpm-ide.configureSerialPort",
+        "title": "CP/M IDE: Configure Serial Port Settings"
+      },
+      {
+        "command": "cpm-ide.transferFileToDevice",
+        "title": "CP/M IDE: Transfer File to CP/M Device"
+      },
+      {
+        "command": "cpm-ide.transferFileFromDevice",
+        "title": "CP/M IDE: Transfer File from CP/M Device",
+        "icon": "$(cloud-download)"
+      },
+      {
+        "command": "cpm-ide.buildProject",
+        "title": "Build CP/M Project"
+      },
+      {
+        "command": "cpm-ide.refreshFileExplorer",
+        "title": "CP/M IDE: Refresh CP/M Files",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "cpm-ide.runCommsTest",
+        "title": "CP/M IDE: Run Serial Comms Test (DIR)"
+      }
+    ],
+    "views": {
+      "explorer": [
+        {
+          "id": "cpmFilesExplorer",
+          "name": "CP/M Files"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "cpm-ide.refreshFileExplorer",
+          "when": "view == cpmFilesExplorer",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "cpm-ide.transferFileFromDevice",
+          "when": "view == cpmFilesExplorer && viewItem == cpmFile",
+          "group": "inline"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "CP/M IDE",
+      "properties": {
+        "cpmIde.serialPort": {
+          "type": "string",
+          "default": "COM1",
+          "description": "Serial port for CP/M device connection"
+        },
+        "cpmIde.baudRate": {
+          "type": "integer",
+          "default": 9600,
+          "description": "Serial port baud rate"
+        },
+        "cpmIde.dataBits": {
+          "type": "integer",
+          "default": 8,
+          "enum": [
+            5,
+            6,
+            7,
+            8
+          ]
+        },
+        "cpmIde.stopBits": {
+          "type": "integer",
+          "default": 1,
+          "enum": [
+            1,
+            2
+          ]
+        },
+        "cpmIde.parity": {
+          "type": "string",
+          "default": "none",
+          "enum": [
+            "none",
+            "even",
+            "odd"
+          ]
+        },
+        "cpmIde.flowControl": {
+          "type": "string",
+          "default": "none",
+          "enum": [
+            "none",
+            "xonxoff",
+            "rtscts"
+          ],
+          "description": "Flow control for the CP/M serial console. Leave as none unless your device specifically requires Xon/Xoff or RTS/CTS handshaking."
+        },
+        "cpmIde.enableSerialTrace": {
+          "type": "boolean",
+          "default": false,
+          "description": "Log every byte sent/received over the CP/M serial connection as a hex dump to the \"CP/M IDE: Serial Trace\" output channel. Useful for diagnosing comms issues; noisy otherwise."
+        },
+        "cpmIde.terminalSize": {
+          "type": "string",
+          "default": "80x25",
+          "enum": [
+            "80x25",
+            "64x16",
+            "40x24",
+            "52x24"
+          ],
+          "description": "Fixed character grid for the CP/M terminal display. The font size is scaled to fit this many columns/rows into the available panel space."
+        },
+        "cpmIde.assembler": {
+          "type": "string",
+          "enum": [
+            "z80asm",
+            "zasm",
+            "tasm",
+            "other"
+          ],
+          "default": "z80asm",
+          "description": "Z80 assembler to use (z80asm, zasm, tasm, or other)"
+        },
+        "cpmIde.assemblerPath": {
+          "type": "string",
+          "default": "",
+          "description": "Full path to assembler executable (leave empty to use default)"
+        },
+        "cpmIde.zasmFlags": {
+          "type": "string",
+          "default": "-b",
+          "description": "ZASM-specific command-line flags"
+        },
+        "cpmIde.compiler": {
+          "type": "string",
+          "enum": [
+            "cc",
+            "sdcc",
+            "other"
+          ],
+          "default": "cc",
+          "description": "C compiler to use (cc, sdcc, or other)"
+        },
+        "cpmIde.compilerPath": {
+          "type": "string",
+          "default": "",
+          "description": "Full path to C compiler executable (leave empty to use default)"
+        },
+        "cpmIde.sdccTarget": {
+          "type": "string",
+          "default": "z80",
+          "enum": [
+            "z80",
+            "z180",
+            "r2k",
+            "r3ka"
+          ],
+          "description": "SDCC target architecture (z80, z180, r2k, r3ka)"
+        },
+        "cpmIde.sdccFlags": {
+          "type": "string",
+          "default": "",
+          "description": "SDCC-specific command-line flags"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src --ext ts",
+    "test": "node ./out/test/runTest.js"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "^4.2.0",
+    "@types/mocha": "^10.0.0",
+    "@types/node": "^20.0.0",
+    "@types/serialport": "^8.0.0",
+    "@types/vscode": "^1.80.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "@vscode/test-electron": "^2.3.0",
+    "eslint": "^8.0.0",
+    "mocha": "^10.0.0",
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "@serialport/bindings": "^10.0.1",
+    "serialport": "^9.2.0"
+  }
+}

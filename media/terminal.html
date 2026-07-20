@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src {{cspSource}}; script-src {{cspSource}};">
+<link rel="stylesheet" href="{{styleUri}}">
+</head>
+<body>
+<div class="controls">
+  <div class="row">
+    <label>Port</label>
+    <select id="port"></select>
+    <button id="refresh-btn" title="Refresh port list">&#x21BB;</button>
+  </div>
+  <div class="row">
+    <label>Baud rate</label>
+    <select id="baud"></select>
+  </div>
+  <div class="row">
+    <label>Data bits</label>
+    <select id="databits"></select>
+    <label class="label-narrow">Stop</label>
+    <select id="stopbits" class="select-narrow"></select>
+  </div>
+  <div class="row">
+    <label>Parity</label>
+    <select id="parity"></select>
+  </div>
+  <div class="row">
+    <label>Flow ctrl</label>
+    <select id="flowcontrol"></select>
+  </div>
+  <div class="row">
+    <label for="trace-toggle" class="label-auto">
+      <input type="checkbox" id="trace-toggle" />
+      Trace to output
+    </label>
+  </div>
+  <div class="row">
+    <label>Term size</label>
+    <select id="termsize"></select>
+  </div>
+  <div class="row">
+    <button id="connect-btn">Connect</button>
+    <button id="disconnect-btn" class="secondary" disabled>Disconnect</button>
+    <button id="clear-btn" class="secondary">Clear</button>
+    <div id="status" class="disconnected">Disconnected</div>
+  </div>
+</div>
+<hr>
+<div id="ready-bar">
+  <span id="ready-dot"></span>
+  <span id="ready-text">Disconnected</span>
+</div>
+<div id="output" tabindex="0"></div>
+<div id="activity-panel">
+  <div id="activity-header">Background Activity</div>
+  <div id="activity-log"></div>
+</div>
+<script src="{{scriptUri}}"></script>
+</body>
+</html>

@@ -1,0 +1,18 @@
+{
+  "cpmIde.serialPort": "COM1",
+  "cpmIde.baudRate": 9600,
+  "cpmIde.dataBits": 8,
+  "cpmIde.stopBits": 1,
+  "cpmIde.parity": "none",
+  "cpmIde.assembler": "z80asm",
+  "cpmIde.assemblerPath": "",
+  "cpmIde.zasmFlags": "-b",
+  "cpmIde.compiler": "cc",
+  "cpmIde.compilerPath": "",
+  "cpmIde.sdccTarget": "z80",
+  "cpmIde.sdccFlags": "",
+  "[asm-z80]": {
+    "editor.tabSize": 4,
+    "editor.insertSpaces": true
+  }
+}

@@ -1,0 +1,124 @@
+{
+  "scopeName": "source.asm.z80",
+  "fileTypes": ["asm", "s", "z80"],
+  "patterns": [
+    {
+      "include": "#comment"
+    },
+    {
+      "include": "#string"
+    },
+    {
+      "include": "#number"
+    },
+    {
+      "include": "#label"
+    },
+    {
+      "include": "#directive"
+    },
+    {
+      "include": "#mnemonic"
+    },
+    {
+      "include": "#register"
+    },
+    {
+      "include": "#operator"
+    }
+  ],
+  "repository": {
+    "comment": {
+      "patterns": [
+        {
+          "match": ";.*",
+          "name": "comment.line.semicolon.z80"
+        },
+        {
+          "match": "\\*.*",
+          "name": "comment.line.asterisk.z80"
+        }
+      ]
+    },
+    "string": {
+      "patterns": [
+        {
+          "match": "\"([^\"])*\"",
+          "name": "string.quoted.double.z80"
+        },
+        {
+          "match": "'([^'])*'",
+          "name": "string.quoted.single.z80"
+        }
+      ]
+    },
+    "number": {
+      "patterns": [
+        {
+          "match": "\\b0x[0-9a-fA-F]+\\b",
+          "name": "constant.numeric.hex.z80"
+        },
+        {
+          "match": "\\$[0-9a-fA-F]+\\b",
+          "name": "constant.numeric.hex.z80"
+        },
+        {
+          "match": "[0-9]+h\\b",
+          "name": "constant.numeric.hex.z80"
+        },
+        {
+          "match": "\\b[0-9]+b\\b",
+          "name": "constant.numeric.binary.z80"
+        },
+        {
+          "match": "[0-9]+o\\b",
+          "name": "constant.numeric.octal.z80"
+        },
+        {
+          "match": "\\b[0-9]+\\b",
+          "name": "constant.numeric.decimal.z80"
+        }
+      ]
+    },
+    "label": {
+      "match": "^\\s*[a-zA-Z_][a-zA-Z0-9_]*:",
+      "name": "entity.name.label.z80"
+    },
+    "directive": {
+      "patterns": [
+        {
+          "match": "(?i)^\\s*(?:org|equ|db|dw|ds|defb|defw|defs|include|macro|endm|if|ifdef|ifndef|endif|define|undef)\\b",
+          "name": "keyword.control.z80"
+        },
+        {
+          "match": "(?i)\\b(?:ORG|EQU|DB|DW|DS|DEFB|DEFW|DEFS|INCLUDE|MACRO|ENDM|IF|IFDEF|IFNDEF|ENDIF|DEFINE|UNDEF)\\b",
+          "name": "keyword.control.z80"
+        }
+      ]
+    },
+    "mnemonic": {
+      "patterns": [
+        {
+          "match": "(?i)\\b(?:adc|add|and|bit|call|ccf|cp|cpd|cpdr|cpi|cpir|cpl|daa|dec|djnz|ex|exx|halt|im|in|inc|ind|indr|ini|inir|jp|jr|ld|ldd|lddr|ldi|ldir|neg|nop|or|otdr|otir|out|outd|outi|pop|push|res|ret|reti|retn|rl|rla|rlc|rlca|rld|rr|rra|rrc|rrca|rrd|rst|sbc|scf|set|sla|sll|sra|srl|sub|xor)\\b",
+          "name": "keyword.mnemonic.z80"
+        }
+      ]
+    },
+    "register": {
+      "patterns": [
+        {
+          "match": "(?i)\\b(?:af|bc|de|hl|ix|iy|sp|pc|a|b|c|d|e|h|l|i|r|ixh|ixl|iyh|iyl)\\b",
+          "name": "variable.register.z80"
+        }
+      ]
+    },
+    "operator": {
+      "patterns": [
+        {
+          "match": "[+\\-*/&|^~]",
+          "name": "keyword.operator.z80"
+        }
+      ]
+    }
+  }
+}
