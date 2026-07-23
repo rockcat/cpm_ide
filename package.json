@@ -1,16 +1,16 @@
 {
   "name": "cpm-ide",
   "displayName": "CP/M IDE",
-  "icon": "media/cpm-ide.svg",
+  "icon": "media/icon.png",
   "description": "VS Code extension for CP/M application development with serial terminal and file transfer",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "publisher": "rockcat",
   "engines": {
     "vscode": "^1.80.0"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/rockcat/cpm-ide.git"
+    "url": "git+https://github.com/rockcat/cpm_ide.git"
   },
   "author": "rockcat",
   "license": "SEE LICENSE IN LICENSE.txt",
