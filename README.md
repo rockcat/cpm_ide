@@ -2,6 +2,8 @@
 
 A VS Code extension for CP/M application development with an integrated serial terminal, a fast custom transfer protocol, and file transfer/build tooling.
 
+![Integrated environment](https://raw.githubusercontent.com/rockcat/cpm_ide/refs/heads/main/screenshots/workspace.png)
+
 ## Features
 
 ### 🔌 Integrated Serial Terminal
