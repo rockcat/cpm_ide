@@ -13,3 +13,4 @@ remote/*.asm
 remote/*.lst
 remote/*.rom
 PAT
+screenshots/
