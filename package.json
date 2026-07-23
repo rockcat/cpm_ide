@@ -3,7 +3,7 @@
   "displayName": "CP/M IDE",
   "icon": "media/icon.png",
   "description": "VS Code extension for CP/M application development with serial terminal and file transfer",
-  "version": "0.2.0",
+  "version": "0.2.2",
   "publisher": "rockcat",
   "engines": {
     "vscode": "^1.80.0"
@@ -251,141 +251,153 @@
         }
       ]
     },
-    "configuration": {
-      "title": "CP/M IDE",
-      "properties": {
-        "cpmIde.serialPort": {
-          "type": "string",
-          "default": "COM1",
-          "description": "Serial port for CP/M device connection"
-        },
-        "cpmIde.baudRate": {
-          "type": "integer",
-          "default": 9600,
-          "description": "Serial port baud rate"
-        },
-        "cpmIde.dataBits": {
-          "type": "integer",
-          "default": 8,
-          "enum": [
-            5,
-            6,
-            7,
-            8
-          ]
-        },
-        "cpmIde.stopBits": {
-          "type": "integer",
-          "default": 1,
-          "enum": [
-            1,
-            2
-          ]
-        },
-        "cpmIde.parity": {
-          "type": "string",
-          "default": "none",
-          "enum": [
-            "none",
-            "even",
-            "odd"
-          ]
-        },
-        "cpmIde.flowControl": {
-          "type": "string",
-          "default": "none",
-          "enum": [
-            "none",
-            "xonxoff",
-            "rtscts"
-          ],
-          "description": "Flow control for the CP/M serial console. Leave as none unless your device specifically requires Xon/Xoff or RTS/CTS handshaking."
-        },
-        "cpmIde.enableSerialTrace": {
-          "type": "boolean",
-          "default": false,
-          "description": "Log every byte sent/received over the CP/M serial connection as a hex dump to the \"CP/M IDE: Serial Trace\" output channel. Useful for diagnosing comms issues; noisy otherwise."
-        },
-        "cpmIde.forceCapitals": {
-          "type": "boolean",
-          "default": true,
-          "description": "Force all input to be converted to uppercase in the CP/M terminal."
-        },
-        "cpmIde.textColor": {
-          "type": "string",
-          "default": "#cccccc",
-          "description": "Text color for the CP/M terminal output."
-        },
-        "cpmIde.terminalSize": {
-          "type": "string",
-          "default": "80x25",
-          "enum": [
-            "80x25",
-            "64x16",
-            "40x24",
-            "52x24"
-          ],
-          "description": "Fixed character grid for the CP/M terminal display. The font size is scaled to fit this many columns/rows into the available panel space."
-        },
-        "cpmIde.assembler": {
-          "type": "string",
-          "enum": [
-            "z80asm",
-            "zasm",
-            "tasm",
-            "other"
-          ],
-          "default": "z80asm",
-          "description": "Z80 assembler to use (z80asm, zasm, tasm, or other)"
-        },
-        "cpmIde.assemblerPath": {
-          "type": "string",
-          "default": "",
-          "description": "Full path to assembler executable (leave empty to use default)"
-        },
-        "cpmIde.zasmFlags": {
-          "type": "string",
-          "default": "-b",
-          "description": "ZASM-specific command-line flags"
-        },
-        "cpmIde.compiler": {
-          "type": "string",
-          "enum": [
-            "cc",
-            "sdcc",
-            "other"
-          ],
-          "default": "cc",
-          "description": "C compiler to use (cc, sdcc, or other)"
-        },
-        "cpmIde.compilerPath": {
-          "type": "string",
-          "default": "",
-          "description": "Full path to C compiler executable (leave empty to use default)"
-        },
-        "cpmIde.sdccTarget": {
-          "type": "string",
-          "default": "z80",
-          "enum": [
-            "z80",
-            "z180",
-            "r2k",
-            "r3ka"
-          ],
-          "description": "SDCC target architecture (z80, z180, r2k, r3ka)"
-        },
-        "cpmIde.sdccFlags": {
-          "type": "string",
-          "default": "",
-          "description": "SDCC-specific command-line flags"
-        },
-        "cpmIde.makeCommand": {
-          "type": "string",
-          "default": "",
-          "description": "Command to run for Make-based builds (e.g. 'make', 'mingw32-make -f Custom.mk'). If set and a Makefile/makefile is found in the workspace root, Build Project runs this instead of assembling/compiling files individually. Leave empty to always use the per-file build."
+    "configuration": [
+      {
+        "title": "CP/M IDE: Serial",
+        "properties": {
+          "cpmIde.serialPort": {
+            "type": "string",
+            "default": "COM1",
+            "description": "Serial port for CP/M device connection"
+          },
+          "cpmIde.baudRate": {
+            "type": "integer",
+            "default": 9600,
+            "description": "Serial port baud rate"
+          },
+          "cpmIde.dataBits": {
+            "type": "integer",
+            "default": 8,
+            "enum": [
+              5,
+              6,
+              7,
+              8
+            ]
+          },
+          "cpmIde.stopBits": {
+            "type": "integer",
+            "default": 1,
+            "enum": [
+              1,
+              2
+            ]
+          },
+          "cpmIde.parity": {
+            "type": "string",
+            "default": "none",
+            "enum": [
+              "none",
+              "even",
+              "odd"
+            ]
+          },
+          "cpmIde.flowControl": {
+            "type": "string",
+            "default": "none",
+            "enum": [
+              "none",
+              "xonxoff",
+              "rtscts"
+            ],
+            "description": "Flow control for the CP/M serial console. Leave as none unless your device specifically requires Xon/Xoff or RTS/CTS handshaking."
+          },
+          "cpmIde.enableSerialTrace": {
+            "type": "boolean",
+            "default": false,
+            "description": "Log every byte sent/received over the CP/M serial connection as a hex dump to the \"CP/M IDE: Serial Trace\" output channel. Useful for diagnosing comms issues; noisy otherwise."
+          }
+        }
+      },
+      {
+        "title": "CP/M IDE: Terminal",
+        "properties": {
+          "cpmIde.forceCapitals": {
+            "type": "boolean",
+            "default": true,
+            "description": "Force all input to be converted to uppercase in the CP/M terminal."
+          },
+          "cpmIde.textColor": {
+            "type": "string",
+            "default": "#cccccc",
+            "description": "Text color for the CP/M terminal output."
+          },
+          "cpmIde.terminalSize": {
+            "type": "string",
+            "default": "80x25",
+            "enum": [
+              "80x25",
+              "64x16",
+              "40x24",
+              "52x24"
+            ],
+            "description": "Fixed character grid for the CP/M terminal display. The font size is scaled to fit this many columns/rows into the available panel space."
+          }
+        }
+      },
+      {
+        "title": "CP/M IDE: Build Tools",
+        "properties": {
+          "cpmIde.assembler": {
+            "type": "string",
+            "enum": [
+              "z80asm",
+              "zasm",
+              "tasm",
+              "other"
+            ],
+            "default": "z80asm",
+            "description": "Z80 assembler to use (z80asm, zasm, tasm, or other)"
+          },
+          "cpmIde.assemblerPath": {
+            "type": "string",
+            "default": "",
+            "description": "Full path to assembler executable (leave empty to use default)"
+          },
+          "cpmIde.zasmFlags": {
+            "type": "string",
+            "default": "-b",
+            "description": "ZASM-specific command-line flags"
+          },
+          "cpmIde.compiler": {
+            "type": "string",
+            "enum": [
+              "cc",
+              "sdcc",
+              "other"
+            ],
+            "default": "cc",
+            "description": "C compiler to use (cc, sdcc, or other)"
+          },
+          "cpmIde.compilerPath": {
+            "type": "string",
+            "default": "",
+            "description": "Full path to C compiler executable (leave empty to use default)"
+          },
+          "cpmIde.sdccTarget": {
+            "type": "string",
+            "default": "z80",
+            "enum": [
+              "z80",
+              "z180",
+              "r2k",
+              "r3ka"
+            ],
+            "description": "SDCC target architecture (z80, z180, r2k, r3ka)"
+          },
+          "cpmIde.sdccFlags": {
+            "type": "string",
+            "default": "",
+            "description": "SDCC-specific command-line flags"
+          },
+          "cpmIde.makeCommand": {
+            "type": "string",
+            "default": "",
+            "description": "Command to run for Make-based builds (e.g. 'make', 'mingw32-make -f Custom.mk'). If set and a Makefile/makefile is found in the workspace root, Build Project runs this instead of assembling/compiling files individually. Leave empty to always use the per-file build."
+          }
         }
       }
-    }
+    ]
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",

@@ -167,17 +167,19 @@ export class BuildManager {
 		return new Promise((resolve, reject) => {
 			let cmd: string;
 			const settings = vscode.workspace.getConfiguration('cpmIde');
+			const assemblerPath = settings.get<string>('assemblerPath') || '';
+			const executable = assemblerPath || assembler;
 
 			if (assembler === 'zasm') {
 				// ZASM syntax: zasm [flags] infile [outfile]
 				const zasmFlags = settings.get<string>('zasmFlags') || '-b';
-				cmd = `zasm ${zasmFlags} "${asmFile}" "${outputPath}"`;
+				cmd = `"${executable}" ${zasmFlags} "${asmFile}" "${outputPath}"`;
 			} else if (assembler === 'tasm') {
 				// TASM syntax: tasm infile [outfile] [flags]
-				cmd = `tasm "${asmFile}" "${outputPath}"`;
+				cmd = `"${executable}" "${asmFile}" "${outputPath}"`;
 			} else {
 				// Default z80asm syntax: z80asm [options] infile -o outfile
-				cmd = `${assembler} "${asmFile}" -o "${outputPath}"`;
+				cmd = `"${executable}" "${asmFile}" -o "${outputPath}"`;
 			}
 
 			this.buildChannel.appendLine(`Command: ${cmd}`);
@@ -212,15 +214,17 @@ export class BuildManager {
 		return new Promise((resolve, reject) => {
 			let cmd: string;
 			const settings = vscode.workspace.getConfiguration('cpmIde');
+			const compilerPath = settings.get<string>('compilerPath') || '';
+			const executable = compilerPath || compiler;
 
 			if (compiler === 'sdcc') {
 				// SDCC syntax: sdcc -m[target] [flags] -o outfile infile
 				const target = settings.get<string>('sdccTarget') || 'z80';
 				const sdccFlags = settings.get<string>('sdccFlags') || '';
-				cmd = `sdcc -m${target} ${sdccFlags} -o "${comPath}" "${cFile}"`.trim();
+				cmd = `"${executable}" -m${target} ${sdccFlags} -o "${comPath}" "${cFile}"`.trim();
 			} else {
 				// Default cc syntax: cc -c infile -o outfile
-				cmd = `${compiler} -c "${cFile}" -o "${objPath}"`;
+				cmd = `"${executable}" -c "${cFile}" -o "${objPath}"`;
 			}
 
 			this.buildChannel.appendLine(`Command: ${cmd}`);
