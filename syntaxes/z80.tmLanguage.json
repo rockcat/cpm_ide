@@ -99,15 +99,20 @@
     "mnemonic": {
       "patterns": [
         {
-          "match": "(?i)\\b(?:adc|add|and|bit|call|ccf|cp|cpd|cpdr|cpi|cpir|cpl|daa|dec|djnz|ex|exx|halt|im|in|inc|ind|indr|ini|inir|jp|jr|ld|ldd|lddr|ldi|ldir|neg|nop|or|otdr|otir|out|outd|outi|pop|push|res|ret|reti|retn|rl|rla|rlc|rlca|rld|rr|rra|rrc|rrca|rrd|rst|sbc|scf|set|sla|sll|sra|srl|sub|xor)\\b",
+          "match": "(?i)\\b(?:adc|add|and|bit|call|ccf|cp|cpd|cpdr|cpi|cpir|cpl|daa|dec|djnz|ex|exx|halt|im|in|inc|ind|indr|ini|inir|jp|jr|ld|ldd|lddr|ldi|ldir|neg|nop|or|otdr|otir|out|outd|outi|pop|push|res|ret|reti|retn|rl|rla|rlc|rlca|rld|rr|rra|rrc|rrca|rrd|rst|sbc|scf|set|sla|sll|sra|srl|sub|xor|ei|di)\\b",
           "name": "keyword.mnemonic.z80"
+        },
+        {
+          "comment": "Classic Intel 8080 mnemonics without a same-named Z80 equivalent above - CP/M-era sources (this project's xmodem.asm included) commonly mix both dialects.",
+          "match": "(?i)\\b(?:mov|mvi|lxi|lda|sta|lhld|shld|ldax|stax|xchg|xthl|sphl|pchl|inx|dcx|dad|sbb|inr|dcr|ana|xra|ora|cmp|adi|aci|sui|sbi|ani|xri|ori|cma|cmc|stc|jmp|jc|jnc|jz|jnz|jm|jpe|jpo|cc|cnc|cz|cnz|cm|cpe|cpo|rc|rnc|rz|rnz|rm|rp|rpe|rpo|hlt)\\b",
+          "name": "keyword.mnemonic.i8080.z80"
         }
       ]
     },
     "register": {
       "patterns": [
         {
-          "match": "(?i)\\b(?:af|bc|de|hl|ix|iy|sp|pc|a|b|c|d|e|h|l|i|r|ixh|ixl|iyh|iyl)\\b",
+          "match": "(?i)\\b(?:af|bc|de|hl|ix|iy|sp|pc|a|b|c|d|e|h|l|i|r|ixh|ixl|iyh|iyl|psw|m)\\b",
           "name": "variable.register.z80"
         }
       ]

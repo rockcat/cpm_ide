@@ -47,8 +47,15 @@
       populateSelect('flowcontrol', FLOW_CONTROLS, settings.flowControl, f => f.label);
       populateSelect('termsize', TERMINAL_SIZES, settings.terminalSize);
       $('trace-toggle').checked = !!settings.enableSerialTrace;
+      $('force-caps').checked = !!settings.forceCapitals;
+      $('text-color').value = settings.textColor || '#cccccc';
+      applyTextColor();
       resizeGrid();
       applyTerminalSize();
+    }
+
+    function applyTextColor() {
+      $('output').style.color = $('text-color').value;
     }
 
     $('port').addEventListener('change', () => saveSetting('serialPort', $('port').value));
@@ -58,6 +65,11 @@
     $('parity').addEventListener('change', () => saveSetting('parity', $('parity').value));
     $('flowcontrol').addEventListener('change', () => saveSetting('flowControl', $('flowcontrol').value));
     $('trace-toggle').addEventListener('change', () => saveSetting('enableSerialTrace', $('trace-toggle').checked));
+    $('force-caps').addEventListener('change', () => saveSetting('forceCapitals', $('force-caps').checked));
+    $('text-color').addEventListener('input', () => {
+      applyTextColor();
+      saveSetting('textColor', $('text-color').value);
+    });
     $('termsize').addEventListener('change', () => {
       saveSetting('terminalSize', $('termsize').value);
       resizeGrid();
@@ -113,6 +125,16 @@
     let escYRow = 0;
     let graphicsMode = false;
 
+    // Lines pushed off the top of the live grid, kept around so the user can
+    // scroll back through recent output instead of losing it. Capped so the
+    // DOM doesn't grow without bound over a long session.
+    const MAX_SCROLLBACK = 2000;
+    let scrollback = [];
+    // True once the user has scrolled away from the bottom to read history -
+    // suppresses the auto-scroll-to-bottom on new output until they either
+    // scroll back down themselves or start typing again.
+    let userScrolledUp = false;
+
     // DEC Special Graphics character set, selected by ESC F (exited by ESC G).
     const GRAPHICS_MAP = {
       '_': ' ', '`': '◆', 'a': '▒', 'b': '␉', 'c': '␌',
@@ -145,12 +167,16 @@
     }
 
     function clearScreen() {
+      scrollback = [];
       initScreen(termCols, termRows);
       renderScreen();
     }
 
     function scrollUp() {
-      screen.shift();
+      const departingRow = screen.shift();
+      const line = departingRow.map(escapeHtml).join('').replace(/\s+$/, '');
+      scrollback.push(line);
+      if (scrollback.length > MAX_SCROLLBACK) scrollback.shift();
       screen.push(new Array(termCols).fill(' '));
     }
 
@@ -194,6 +220,9 @@
     function renderScreen() {
       const out = $('output');
       let html = '';
+      for (const line of scrollback) {
+        html += line + '\n';
+      }
       for (let r = 0; r < termRows; r++) {
         for (let c = 0; c < termCols; c++) {
           const ch = escapeHtml(screen[r][c]);
@@ -202,6 +231,9 @@
         if (r < termRows - 1) html += '\n';
       }
       out.innerHTML = html;
+      if (!userScrolledUp) {
+        out.scrollTop = out.scrollHeight;
+      }
     }
 
     function processVT52(text) {
@@ -290,17 +322,36 @@
 
     $('disconnect-btn').addEventListener('click', () => vscode.postMessage({ command: 'disconnect' }));
 
+    $('reset-btn').addEventListener('click', () => {
+      $('reset-btn').disabled = true;
+      vscode.postMessage({ command: 'resetConnection' });
+    });
+
     $('clear-btn').addEventListener('click', () => clearScreen());
 
     let isConnected = false;
     let isBusy = false;
     let connectedPort = '';
 
+    // Tracks whether the user has scrolled up to read history, so new
+    // output doesn't yank them back down mid-read.
+    $('output').addEventListener('scroll', () => {
+      const out = $('output');
+      userScrolledUp = out.scrollHeight - out.scrollTop - out.clientHeight > 4;
+    });
+
     // Typing happens directly in the terminal output, like a real serial
     // terminal - keystrokes go straight to the device, which echoes them
     // back over the serial line (no local echo here).
     $('output').addEventListener('keydown', e => {
       if (!isConnected || isBusy) return;
+      if (userScrolledUp) {
+        // The user was reading scrollback - typing means they're back to
+        // actively using the terminal, so snap to the live view first.
+        const out = $('output');
+        out.scrollTop = out.scrollHeight;
+        userScrolledUp = false;
+      }
       if (e.key === 'Enter') {
         e.preventDefault();
         // Bare CR, matching CP/M console input - a trailing LF is never
@@ -323,7 +374,8 @@
         vscode.postMessage({ command: 'sendData', data: String.fromCharCode(code) });
       } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
         e.preventDefault();
-        vscode.postMessage({ command: 'sendData', data: e.key });
+        const data = $('force-caps').checked ? e.key.toUpperCase() : e.key;
+        vscode.postMessage({ command: 'sendData', data });
       }
     });
 
@@ -354,6 +406,7 @@
       const status = $('status');
       const dot = $('ready-dot');
       const readyText = $('ready-text');
+      $('reset-btn').disabled = !(isConnected || isBusy);
       if (!isConnected) {
         status.textContent = 'Disconnected';
         status.className = 'disconnected';

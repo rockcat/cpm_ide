@@ -11,16 +11,29 @@ body {
   gap: 5px;
 }
 .controls { display: flex; flex-direction: column; gap: 3px; flex-shrink: 0; }
-.row { display: flex; gap: 4px; align-items: center; }
+.row { display: flex; gap: 6px; justify-content: space-between; align-items: center; }
+
+#termsize { max-width: 120px; }
 label {
   font-size: 11px;
   white-space: nowrap;
+  text-align: right;
   min-width: 58px;
   color: var(--vscode-descriptionForeground);
 }
 label.label-narrow { min-width: 28px; }
 label.label-auto { min-width: auto; }
 input[type="checkbox"] { vertical-align: middle; }
+input[type="color"] {
+  width: 28px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--vscode-panel-border, #444);
+  border-radius: 3px;
+  background: none;
+  vertical-align: middle;
+  cursor: pointer;
+}
 select {
   flex: 1;
   min-width: 0;
@@ -86,7 +99,8 @@ hr { border: none; border-top: 1px solid var(--vscode-panel-border); margin: 1px
   font-size: 12px;
   line-height: 1.4;
   padding: 4px 6px;
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
   white-space: pre;
   border: 1px solid var(--vscode-panel-border, #444);
   cursor: text;

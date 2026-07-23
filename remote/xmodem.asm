@@ -18,8 +18,10 @@
 ;
 ; A file name is madatory, and can be any legal CP/M file
 ; name. If you are receiving with Xmodem and the file already
-; exists, then you will be asked if it should be overwritten.
-; If you are sending, then the file must exist, obviously.
+; exists, then you will be asked if it should be overwritten,
+; unless /F was specified, in which case it is overwritten
+; without asking. If you are sending, then the file must
+; exist, obviously.
 ;
 ; Xmodem first looks for a file called XMODEM.CFG on CP/M's
 ; default drive. If found, then this file is parsed for
@@ -44,6 +46,10 @@
 ;     Z flag set if no character is waiting. Note that this
 ;     option does not actually select the RDR device as the
 ;     transfer port. (/X1 does.)
+;
+;  /F Forces an existing file to be overwritten when receiving,
+;     without asking "Overwrite (Y/N)?". Useful when Xmodem is
+;     driven by a script/host that can't answer prompts.
 ;
 ;  /In h0 h1 h2... (max h11) Defines assembly code for the
 ;      custom I/O port (used by the /X3 option), using Intel
@@ -342,7 +348,7 @@ VERSION	equ	0210h	;high byte = major revision number
 			;low byte = minor version
 
 FALSE	equ	0
-TRUE	equ	not FALSE
+TRUE	equ	255
 
 ERRLIM	equ	10	;Max error-retries. 10 is standard.
 
@@ -350,7 +356,7 @@ DBSIZ	equ	63	;default buffer size (kbytes)
 			;(Uses the smaller of this
 			;and "all available RAM")
 
-CRSTAL	equ	10	;delay (in seconds) before
+CRSTAL	equ	7 		; WAS 10 which is a BUG in original XMODEM	;delay (in seconds) before
 			;..receiving when the console
 			;..is the transfer port
 
@@ -885,73 +891,73 @@ CRCTAB:
 
 ;high bytes
 
-db	000h,010h,020h,030h,040h,050h,060h,070h
-db	081h,091h,0A1h,0B1h,0C1h,0D1h,0E1h,0F1h
-db	012h,002h,032h,022h,052h,042h,072h,062h
-db	093h,083h,0B3h,0A3h,0D3h,0C3h,0F3h,0E3h
-db	024h,034h,004h,014h,064h,074h,044h,054h
-db	0A5h,0B5h,085h,095h,0E5h,0F5h,0C5h,0D5h
-db	036h,026h,016h,006h,076h,066h,056h,046h
-db	0B7h,0A7h,097h,087h,0F7h,0E7h,0D7h,0C7h
-db	048h,058h,068h,078h,008h,018h,028h,038h
-db	0C9h,0D9h,0E9h,0F9h,089h,099h,0A9h,0B9h
-db	05Ah,04Ah,07Ah,06Ah,01Ah,00Ah,03Ah,02Ah
-db	0DBh,0CBh,0FBh,0EBh,09Bh,08Bh,0BBh,0ABh
-db	06Ch,07Ch,04Ch,05Ch,02Ch,03Ch,00Ch,01Ch
-db	0EDh,0FDh,0CDh,0DDh,0ADh,0BDh,08Dh,09Dh
-db	07Eh,06Eh,05Eh,04Eh,03Eh,02Eh,01Eh,00Eh
-db	0FFh,0EFh,0DFh,0CFh,0BFh,0AFh,09Fh,08Fh
-db	091h,081h,0B1h,0A1h,0D1h,0C1h,0F1h,0E1h
-db	010h,000h,030h,020h,050h,040h,070h,060h
-db	083h,093h,0A3h,0B3h,0C3h,0D3h,0E3h,0F3h
-db	002h,012h,022h,032h,042h,052h,062h,072h
-db	0B5h,0A5h,095h,085h,0F5h,0E5h,0D5h,0C5h
-db	034h,024h,014h,004h,074h,064h,054h,044h
-db	0A7h,0B7h,087h,097h,0E7h,0F7h,0C7h,0D7h
-db	026h,036h,006h,016h,066h,076h,046h,056h
-db	0D9h,0C9h,0F9h,0E9h,099h,089h,0B9h,0A9h
-db	058h,048h,078h,068h,018h,008h,038h,028h
-db	0CBh,0DBh,0EBh,0FBh,08Bh,09Bh,0ABh,0BBh
-db	04Ah,05Ah,06Ah,07Ah,00Ah,01Ah,02Ah,03Ah
-db	0FDh,0EDh,0DDh,0CDh,0BDh,0ADh,09Dh,08Dh
-db	07Ch,06Ch,05Ch,04Ch,03Ch,02Ch,01Ch,00Ch
-db	0EFh,0FFh,0CFh,0DFh,0AFh,0BFh,08Fh,09Fh
-db	06Eh,07Eh,04Eh,05Eh,02Eh,03Eh,00Eh,01Eh
+.db	00h, 010h,020h,030h,040h,050h,060h,070h
+.db	081h,091h,0A1h,0B1h,0C1h,0D1h,0E1h,0F1h
+.db	012h,002h,032h,022h,052h,042h,072h,062h
+.db	093h,083h,0B3h,0A3h,0D3h,0C3h,0F3h,0E3h
+.db	024h,034h,004h,014h,064h,074h,044h,054h
+.db	0A5h,0B5h,085h,095h,0E5h,0F5h,0C5h,0D5h
+.db	036h,026h,016h,006h,076h,066h,056h,046h
+.db	0B7h,0A7h,097h,087h,0F7h,0E7h,0D7h,0C7h
+.db	048h,058h,068h,078h,008h,018h,028h,038h
+.db	0C9h,0D9h,0E9h,0F9h,089h,099h,0A9h,0B9h
+.db	05Ah,04Ah,07Ah,06Ah,01Ah,00Ah,03Ah,02Ah
+.db	0DBh,0CBh,0FBh,0EBh,09Bh,08Bh,0BBh,0ABh
+.db	06Ch,07Ch,04Ch,05Ch,02Ch,03Ch,00Ch,01Ch
+.db	0EDh,0FDh,0CDh,0DDh,0ADh,0BDh,08Dh,09Dh
+.db	07Eh,06Eh,05Eh,04Eh,03Eh,02Eh,01Eh,00Eh
+.db	0FFh,0EFh,0DFh,0CFh,0BFh,0AFh,09Fh,08Fh
+.db	091h,081h,0B1h,0A1h,0D1h,0C1h,0F1h,0E1h
+.db	010h,000h,030h,020h,050h,040h,070h,060h
+.db	083h,093h,0A3h,0B3h,0C3h,0D3h,0E3h,0F3h
+.db	002h,012h,022h,032h,042h,052h,062h,072h
+.db	0B5h,0A5h,095h,085h,0F5h,0E5h,0D5h,0C5h
+.db	034h,024h,014h,004h,074h,064h,054h,044h
+.db	0A7h,0B7h,087h,097h,0E7h,0F7h,0C7h,0D7h
+.db	026h,036h,006h,016h,066h,076h,046h,056h
+.db	0D9h,0C9h,0F9h,0E9h,099h,089h,0B9h,0A9h
+.db	058h,048h,078h,068h,018h,008h,038h,028h
+.db	0CBh,0DBh,0EBh,0FBh,08Bh,09Bh,0ABh,0BBh
+.db	04Ah,05Ah,06Ah,07Ah,00Ah,01Ah,02Ah,03Ah
+.db	0FDh,0EDh,0DDh,0CDh,0BDh,0ADh,09Dh,08Dh
+.db	07Ch,06Ch,05Ch,04Ch,03Ch,02Ch,01Ch,00Ch
+.db	0EFh,0FFh,0CFh,0DFh,0AFh,0BFh,08Fh,09Fh
+.db	06Eh,07Eh,04Eh,05Eh,02Eh,03Eh,00Eh,01Eh
 
 ;Low Bytes
 
-db	000h,021h,042h,063h,084h,0A5h,0C6h,0E7h
-db	008h,029h,04Ah,06Bh,08Ch,0ADh,0CEh,0EFh
-db	031h,010h,073h,052h,0B5h,094h,0F7h,0D6h
-db	039h,018h,07Bh,05Ah,0BDh,09Ch,0FFh,0DEh
-db	062h,043h,020h,001h,0E6h,0C7h,0A4h,085h
-db	06Ah,04Bh,028h,009h,0EEh,0CFh,0ACh,08Dh
-db	053h,072h,011h,030h,0D7h,0F6h,095h,0B4h
-db	05Bh,07Ah,019h,038h,0DFh,0FEh,09Dh,0BCh
-db	0C4h,0E5h,086h,0A7h,040h,061h,002h,023h
-db	0CCh,0EDh,08Eh,0AFh,048h,069h,00Ah,02Bh
-db	0F5h,0D4h,0B7h,096h,071h,050h,033h,012h
-db	0FDh,0DCh,0BFh,09Eh,079h,058h,03Bh,01Ah
-db	0A6h,087h,0E4h,0C5h,022h,003h,060h,041h
-db	0AEh,08Fh,0ECh,0CDh,02Ah,00Bh,068h,049h
-db	097h,0B6h,0D5h,0F4h,013h,032h,051h,070h
-db	09Fh,0BEh,0DDh,0FCh,01Bh,03Ah,059h,078h
-db	088h,0A9h,0CAh,0EBh,00Ch,02Dh,04Eh,06Fh
-db	080h,0A1h,0C2h,0E3h,004h,025h,046h,067h
-db	0B9h,098h,0FBh,0DAh,03Dh,01Ch,07Fh,05Eh
-db	0B1h,090h,0F3h,0D2h,035h,014h,077h,056h
-db	0EAh,0CBh,0A8h,089h,06Eh,04Fh,02Ch,00Dh
-db	0E2h,0C3h,0A0h,081h,066h,047h,024h,005h
-db	0DBh,0FAh,099h,0B8h,05Fh,07Eh,01Dh,03Ch
-db	0D3h,0F2h,091h,0B0h,057h,076h,015h,034h
-db	04Ch,06Dh,00Eh,02Fh,0C8h,0E9h,08Ah,0ABh
-db	044h,065h,006h,027h,0C0h,0E1h,082h,0A3h
-db	07Dh,05Ch,03Fh,01Eh,0F9h,0D8h,0BBh,09Ah
-db	075h,054h,037h,016h,0F1h,0D0h,0B3h,092h
-db	02Eh,00Fh,06Ch,04Dh,0AAh,08Bh,0E8h,0C9h
-db	026h,007h,064h,045h,0A2h,083h,0E0h,0C1h
-db	01Fh,03Eh,05Dh,07Ch,09Bh,0BAh,0D9h,0F8h
-db	017h,036h,055h,074h,093h,0B2h,0D1h,0F0h
+.db	000h,021h,042h,063h,084h,0A5h,0C6h,0E7h
+.db	008h,029h,04Ah,06Bh,08Ch,0ADh,0CEh,0EFh
+.db	031h,010h,073h,052h,0B5h,094h,0F7h,0D6h
+.db	039h,018h,07Bh,05Ah,0BDh,09Ch,0FFh,0DEh
+.db	062h,043h,020h,001h,0E6h,0C7h,0A4h,085h
+.db	06Ah,04Bh,028h,009h,0EEh,0CFh,0ACh,08Dh
+.db	053h,072h,011h,030h,0D7h,0F6h,095h,0B4h
+.db	05Bh,07Ah,019h,038h,0DFh,0FEh,09Dh,0BCh
+.db	0C4h,0E5h,086h,0A7h,040h,061h,002h,023h
+.db	0CCh,0EDh,08Eh,0AFh,048h,069h,00Ah,02Bh
+.db	0F5h,0D4h,0B7h,096h,071h,050h,033h,012h
+.db	0FDh,0DCh,0BFh,09Eh,079h,058h,03Bh,01Ah
+.db	0A6h,087h,0E4h,0C5h,022h,003h,060h,041h
+.db	0AEh,08Fh,0ECh,0CDh,02Ah,00Bh,068h,049h
+.db	097h,0B6h,0D5h,0F4h,013h,032h,051h,070h
+.db	09Fh,0BEh,0DDh,0FCh,01Bh,03Ah,059h,078h
+.db	088h,0A9h,0CAh,0EBh,00Ch,02Dh,04Eh,06Fh
+.db	080h,0A1h,0C2h,0E3h,004h,025h,046h,067h
+.db	0B9h,098h,0FBh,0DAh,03Dh,01Ch,07Fh,05Eh
+.db	0B1h,090h,0F3h,0D2h,035h,014h,077h,056h
+.db	0EAh,0CBh,0A8h,089h,06Eh,04Fh,02Ch,00Dh
+.db	0E2h,0C3h,0A0h,081h,066h,047h,024h,005h
+.db	0DBh,0FAh,099h,0B8h,05Fh,07Eh,01Dh,03Ch
+.db	0D3h,0F2h,091h,0B0h,057h,076h,015h,034h
+.db	04Ch,06Dh,00Eh,02Fh,0C8h,0E9h,08Ah,0ABh
+.db	044h,065h,006h,027h,0C0h,0E1h,082h,0A3h
+.db	07Dh,05Ch,03Fh,01Eh,0F9h,0D8h,0BBh,09Ah
+.db	075h,054h,037h,016h,0F1h,0D0h,0B3h,092h
+.db	02Eh,00Fh,06Ch,04Dh,0AAh,08Bh,0E8h,0C9h
+.db	026h,007h,064h,045h,0A2h,083h,0E0h,0C1h
+.db	01Fh,03Eh,05Dh,07Ch,09Bh,0BAh,0D9h,0F8h
+.db	017h,036h,055h,074h,093h,0B2h,0D1h,0F0h
 
 ;***Subroutine******************************************
 ;Receive & validate a block, and see if we got an EOT
@@ -2207,7 +2213,7 @@ TXCUST:
 CWDAT:	mvi	b,0		;Don't flush
 	call	ABORT
 	db	'No /I','1'+80h
-	db	nop
+	db	0
 
 	mov	a,c		;restore registers
 	pop	b
@@ -2236,7 +2242,7 @@ RXCUST:
 CRSTAT:	mvi	b,0		;Don't flush
 	call	ABORT
 	db	'No /I','2'+80h
-	db	nop
+	db	0
 
 	jz	WATCRX
 	pop	h
@@ -2244,18 +2250,19 @@ CRSTAT:	mvi	b,0		;Don't flush
 ;Get the received data byte
 ;(Up to 12 bytes will be written at CRDAT by /I3 here)
 
-CRDAT:	db	nop
-	db	nop
-	db	nop
-	db	nop
-	db	nop
-	db	nop
-	db	nop
-	db	nop
-	db	nop
-	db	nop
-	db	nop
-	db	nop
+CRDAT:	
+	db	0
+	db	0
+	db	0
+	db	0
+	db	0
+	db	0
+	db	0
+	db	0
+	db	0
+	db	0
+	db	0
+	db	0
 
 	ret
 
@@ -2326,6 +2333,8 @@ CPUMHZ:	db	2	;CPU speed in MHz (for timeouts)
 XPORT:	db	1	;Transfer port defaults to RDR/PUN
 ENHRDR:	db	0	;01 for RDR that returns with
 			;..Z set if chr not ready
+FORCE:	db	0	;01 means /F: overwrite an existing
+			;..file on /R without asking
 
 ;***INIT-Only Routine************************
 ;Initialization: parse XMODEM.CFG and command
@@ -2612,6 +2621,10 @@ GORX:
 	call	FCBDOS		;sets de=FCB
 	jm	FILNEX		;-1 means not there (ok)
 
+	lda	FORCE		;/F given? skip the prompt
+	ora	a
+	jnz	RXFORCE		;Y: overwrite without asking
+
 	call	ILPRNT		;continue message
 	db	'exists. Overwrite (Y/N)','?'+80h
 
@@ -2619,6 +2632,7 @@ GORX:
 	cpi	'Y'
 	jnz	EXIT
 
+RXFORCE:
 	call	FERASE		;erase existing file
 				;returns de=FCB
 	call	CILPRT
@@ -2852,16 +2866,17 @@ CHKLUP:	cmp	m		;Match? (alpha order)
 ;****************************************************
 OPTTAB:	db	'C',CCKSUM-(OPTTAB+2)	;Select checksum mode
 	db	'E',CMODR-(OPTTAB+4)	;Enhanced RDR port
-	db	'I',CCIO-(OPTTAB+6)	;Custom I/O definition
-	db	'K',BUFKB-(OPTTAB+8)	;Max buffer size	
-	db	'M',CMESSG-(OPTTAB+10)	;console message
-	db	'O',COUTP-(OPTTAB+12)	;output to port
-	db	'P',CPORT-(OPTTAB+14)	;define transfer port
-	db	'Q',CQUIET-(OPTTAB+16)	;quiet mode
-	db	'R',CSETR-(OPTTAB+18)	;select receive mode
-	db	'S',CSETS-(OPTTAB+20)	;select receive mode
-	db	'X',CSETX-(OPTTAB+22)	;select transfer port
-	db	'Z',CMHZ-(OPTTAB+24)	;specify CPU MHz
+	db	'F',CFORCE-(OPTTAB+6)	;Force overwrite on /R
+	db	'I',CCIO-(OPTTAB+8)	;Custom I/O definition
+	db	'K',BUFKB-(OPTTAB+10)	;Max buffer size
+	db	'M',CMESSG-(OPTTAB+12)	;console message
+	db	'O',COUTP-(OPTTAB+14)	;output to port
+	db	'P',CPORT-(OPTTAB+16)	;define transfer port
+	db	'Q',CQUIET-(OPTTAB+18)	;quiet mode
+	db	'R',CSETR-(OPTTAB+20)	;select receive mode
+	db	'S',CSETS-(OPTTAB+22)	;select receive mode
+	db	'X',CSETX-(OPTTAB+24)	;select transfer port
+	db	'Z',CMHZ-(OPTTAB+26)	;specify CPU MHz
 	db	0FFh			;end of table
 
 ;****************
@@ -2891,6 +2906,19 @@ CCKSUM:	sta	CRCFLG
 ;----------------------------------
 CMODR:	inr	a
 	sta	ENHRDR
+	ret
+
+;******------------------------------------
+;* /F * Force overwrite of an existing file
+;****** on /R, without asking the user
+;On Entry:
+;  a=b=0
+;  (de)=next command line chr
+;On Exit:
+;  FORCE = 1
+;------------------------------------------
+CFORCE:	inr	a
+	sta	FORCE
 	ret
 
 ;*****-------------------------------------------------
@@ -3425,6 +3453,9 @@ CMDTWS:	call	CMDCHR		;EOF, CR, LF?
 ;  hl = IMODFY+1 or OMODFY+1
 ;Trashes a,hl
 ;*********************************************
+
+JZ_OPCODE EQU	0CAh
+
 MODIO:	mov	m,e		;install status port adr
 
 	inx	h		;point to mask location
@@ -3436,7 +3467,7 @@ MODIO:	mov	m,e		;install status port adr
 	ora	a
 				;Code already has a JNZ
 	jz	MODIO1		;need a jz instead?
-	mvi	m,JZ		;y: install jz opcode
+	mvi	m,JZ_OPCODE	;y: install jz opcode
 MODIO1:
 
 	inx	h		;point to data port loc
@@ -3504,7 +3535,7 @@ GHBACK:	dcx	d		;back up
 ;On Exit:
 ;  a=chr
 ;  Carry set if OK, clear if bogus chr
-**************************************
+;**************************************
 HEX2BN:	sui	'0'		;remove ASCII bias
 	cpi	10
 	rc			;if 0-9 then we're done
@@ -3621,6 +3652,7 @@ HLPEXT:	call	CILPRT		;print this message
  db ' /C Receive with checksums, else CRCs',CR
  db '   (Receiver always sets error check mode)',CR
  db ' /E if CP/M RDR returns with Z set when not ready',CR
+ db ' /F Force overwrite on /R, no Y/N prompt',CR
  db ' /Knn sets buffer max k-bytes (default: all free RAM)',CR
  db '   nn is decimal, 0<nn<64',CR,LF
  db '--More-','-'+80h

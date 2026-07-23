@@ -10,3 +10,7 @@ src/test/
 CPM IDE Specification.md
 .claude/
 .vscode/
+remote/*.asm
+remote/*.lst
+remote/*.rom
+PAT

@@ -29,23 +29,59 @@ export class CpmFileExplorer implements vscode.TreeDataProvider<CpmDriveItem | C
 		this._onDidChangeTreeData.fire(undefined);
 	}
 
+	/**
+	 * Re-lists just `drive`, instead of the full scanDrives() + per-drive
+	 * DIR sweep that refresh() does - for updating the tree after an upload
+	 * lands on a known drive, where re-probing every drive A-P is wasted
+	 * device I/O for information we already have.
+	 */
+	async refreshDrive(drive: string): Promise<void> {
+		await this.serialTerminal.withExclusiveAccess(`Refreshing ${drive}: file list…`, async () => {
+			try {
+				const files = await this.serialTerminal.listFilesViaRemoteCcp(drive)
+					?? await this.serialTerminal.getDirListing(drive);
+				this.storeFileList(drive, files);
+			} catch (error) {
+				// Leave the previous listing for this drive in place.
+			}
+		});
+		this._onDidChangeTreeData.fire(undefined);
+	}
+
+	clear(): void {
+		this.drives.clear();
+		this._onDidChangeTreeData.fire(undefined);
+	}
+
+	private storeFileList(drive: string, files: string[]): void {
+		const cpmFiles = files.map(f => ({
+			name: f,
+			drive: drive,
+			type: f.split('.')[1] || 'FILE',
+		}));
+		this.drives.set(drive, cpmFiles);
+	}
+
 	private async loadDrivesAndFiles() {
 		// Runs with exclusive control of the serial line, since scanning
 		// drives and listing files sends its own commands to the CP/M
 		// console and would corrupt anything the user is typing at the
 		// terminal if the two ran concurrently.
 		await this.serialTerminal.withExclusiveAccess('Refreshing CP/M file list…', async () => {
-			const drives = await this.serialTerminal.scanDrives();
+			const viaRemoteCcp = await this.serialTerminal.scanDrivesAndFilesViaRemoteCcp();
+			if (viaRemoteCcp) {
+				for (const [drive, files] of viaRemoteCcp) {
+					this.storeFileList(drive, files);
+				}
+				return;
+			}
 
+			// Remote CCP unavailable - fall back to the CCP-command approach.
+			const drives = await this.serialTerminal.scanDrives();
 			for (const drive of drives) {
 				try {
 					const files = await this.serialTerminal.getDirListing(drive);
-					const cpmFiles = files.map(f => ({
-						name: f,
-						drive: drive,
-						type: f.split('.')[1] || 'FILE',
-					}));
-					this.drives.set(drive, cpmFiles);
+					this.storeFileList(drive, files);
 				} catch (error) {
 					// Skip this drive and keep listing the rest.
 				}
@@ -88,11 +124,6 @@ export class CpmFileItem extends vscode.TreeItem {
 		public fileType: string
 	) {
 		super(fileName);
-		this.command = {
-			command: 'vscode.openFolder',
-			title: 'View File',
-			arguments: [],
-		};
 		this.contextValue = 'cpmFile';
 
 		// Set icon based on file type

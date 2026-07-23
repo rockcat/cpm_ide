@@ -9,3 +9,11 @@ dist/
 build/
 .env
 .env.local
+
+remote/*
+!remote/remotccp.asm
+!remote/xmodem.asm
+
+examples/
+
+PAT

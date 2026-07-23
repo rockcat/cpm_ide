@@ -8,42 +8,63 @@
 <body>
 <div class="controls">
   <div class="row">
-    <label>Port</label>
-    <select id="port"></select>
-    <button id="refresh-btn" title="Refresh port list">&#x21BB;</button>
+    <div>
+      <label>Port</label>
+      <select id="port"></select>
+      <button id="refresh-btn" title="Refresh port list">&#x21BB;</button>
+    </div>
+    <div>
+      <label>Baud rate</label>
+      <select id="baud"></select>
+    </div>
+    <div>
+      <label>Bits</label>
+      <select id="databits"></select>
+    </div>
+    <div>
+      <label class="label-narrow">Stop</label>
+      <select id="stopbits" class="select-narrow"></select>
+    </div>
+    <div>
+      <label>Parity</label>
+      <select id="parity"></select>
+    </div>
+    <div>
+      <label>Flow</label>
+      <select id="flowcontrol"></select>
+    </div>
   </div>
   <div class="row">
-    <label>Baud rate</label>
-    <select id="baud"></select>
+    <div>
+      <label>Term size</label>
+      <select id="termsize"></select>
+    </div>
+    <div>
+      <label for="trace-toggle" class="label-auto">
+        <input type="checkbox" id="trace-toggle" />
+        TX/RX log
+      </label>
+    </div>
+    <div>
+      <label for="force-caps" class="label-auto">
+        <input type="checkbox" id="force-caps" />
+        Force caps
+      </label>
+    </div>
+    <div>
+      <label for="text-color" class="label-auto">
+        Text color
+        <input type="color" id="text-color" />
+      </label>
+    </div>
   </div>
   <div class="row">
-    <label>Data bits</label>
-    <select id="databits"></select>
-    <label class="label-narrow">Stop</label>
-    <select id="stopbits" class="select-narrow"></select>
-  </div>
-  <div class="row">
-    <label>Parity</label>
-    <select id="parity"></select>
-  </div>
-  <div class="row">
-    <label>Flow ctrl</label>
-    <select id="flowcontrol"></select>
-  </div>
-  <div class="row">
-    <label for="trace-toggle" class="label-auto">
-      <input type="checkbox" id="trace-toggle" />
-      Trace to output
-    </label>
-  </div>
-  <div class="row">
-    <label>Term size</label>
-    <select id="termsize"></select>
-  </div>
-  <div class="row">
-    <button id="connect-btn">Connect</button>
-    <button id="disconnect-btn" class="secondary" disabled>Disconnect</button>
-    <button id="clear-btn" class="secondary">Clear</button>
+    <div>
+      <button id="connect-btn">Connect</button>
+      <button id="disconnect-btn" class="secondary" disabled>Disconnect</button>
+      <button id="clear-btn" class="secondary">Clear</button>
+      <button id="reset-btn" class="secondary" disabled>Reset</button>
+    </div>
     <div id="status" class="disconnected">Disconnected</div>
   </div>
 </div>

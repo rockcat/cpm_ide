@@ -12,9 +12,18 @@ export class SerialTerminalPanel {
 		private readonly extensionUri: vscode.Uri
 	) {}
 
+	/** The rightmost currently-open editor group, so the terminal joins it as a tab instead of always splitting open a new column. */
+	private rightmostViewColumn(): vscode.ViewColumn {
+		const groups = vscode.window.tabGroups.all;
+		if (groups.length === 0) {
+			return vscode.ViewColumn.One;
+		}
+		return groups.reduce((max, g) => (g.viewColumn > max ? g.viewColumn : max), groups[0].viewColumn);
+	}
+
 	show() {
 		if (this._panel) {
-			this._panel.reveal(vscode.ViewColumn.Beside);
+			this._panel.reveal(this.rightmostViewColumn());
 			return;
 		}
 
@@ -23,7 +32,7 @@ export class SerialTerminalPanel {
 		this._panel = vscode.window.createWebviewPanel(
 			'cpmSerialTerminal',
 			'CP/M Terminal',
-			vscode.ViewColumn.Beside,
+			this.rightmostViewColumn(),
 			{
 				enableScripts: true,
 				retainContextWhenHidden: true,
@@ -48,6 +57,14 @@ export class SerialTerminalPanel {
 				case 'disconnect':
 					this.serialTerminal.disconnect();
 					break;
+				case 'resetConnection':
+					try {
+						await this.serialTerminal.resetConnection();
+					} catch (err) {
+						this._panel?.webview.postMessage({ command: 'error', text: String(err) });
+						vscode.window.showErrorMessage(`Failed to reset serial connection: ${err}`);
+					}
+					break;
 				case 'sendData':
 					this.serialTerminal.sendData(msg.data);
 					break;
@@ -67,7 +84,7 @@ export class SerialTerminalPanel {
 				case 'updateSetting': {
 					const allowedKeys = [
 						'serialPort', 'baudRate', 'dataBits', 'stopBits', 'parity',
-						'flowControl', 'enableSerialTrace', 'terminalSize'
+						'flowControl', 'enableSerialTrace', 'forceCapitals', 'terminalSize', 'textColor'
 					];
 					if (allowedKeys.includes(msg.key)) {
 						await vscode.workspace.getConfiguration('cpmIde')
@@ -132,7 +149,9 @@ export class SerialTerminalPanel {
 			parity: settings.get<string>('parity') ?? 'none',
 			flowControl: settings.get<string>('flowControl') ?? 'none',
 			enableSerialTrace: settings.get<boolean>('enableSerialTrace') ?? false,
+			forceCapitals: settings.get<boolean>('forceCapitals') ?? true,
 			terminalSize: settings.get<string>('terminalSize') ?? '80x25',
+			textColor: settings.get<string>('textColor') ?? '#cccccc',
 		};
 	}
 

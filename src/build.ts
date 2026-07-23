@@ -22,27 +22,38 @@ export class BuildManager {
 			return false;
 		}
 
+		const workspaceDir = workspaceFolder.uri.fsPath;
 		const settings = vscode.workspace.getConfiguration('cpmIde');
+
+		// A Makefile takes over the whole build, but only if the user has
+		// actually pointed us at a make tool - finding a Makefile with no
+		// configured command to run it would otherwise silently do nothing.
+		const makeCommand = settings.get<string>('makeCommand') || '';
+		const makefilePath = this.findMakefile(workspaceDir);
+		if (makefilePath && makeCommand) {
+			return this.runMake(makeCommand, makefilePath, workspaceDir);
+		}
+
 		const assembler = settings.get<string>('assembler') || 'z80asm';
 		const compiler = settings.get<string>('compiler') || 'cc';
 
 		try {
 			// Find source files
-			const asmFiles = await this.findFiles(workspaceFolder.uri.fsPath, '.asm');
-			const cFiles = await this.findFiles(workspaceFolder.uri.fsPath, '.c');
+			const asmFiles = await this.findFiles(workspaceDir, '.asm');
+			const cFiles = await this.findFiles(workspaceDir, '.c');
 
 			this.buildChannel.appendLine('CP/M Build Started');
-			this.buildChannel.appendLine(`Workspace: ${workspaceFolder.uri.fsPath}`);
+			this.buildChannel.appendLine(`Workspace: ${workspaceDir}`);
 			this.buildChannel.appendLine('');
 
 			// Build assembly files
 			for (const asmFile of asmFiles) {
-				await this.buildAssemblyFile(asmFile, assembler, workspaceFolder.uri.fsPath);
+				await this.buildAssemblyFile(asmFile, assembler, workspaceDir);
 			}
 
 			// Build C files
 			for (const cFile of cFiles) {
-				await this.buildCFile(cFile, compiler, workspaceFolder.uri.fsPath);
+				await this.buildCFile(cFile, compiler, workspaceDir);
 			}
 
 			this.buildChannel.appendLine('');
@@ -54,6 +65,96 @@ export class BuildManager {
 			vscode.window.showErrorMessage(`Build failed: ${error}`);
 			return false;
 		}
+	}
+
+	/**
+	 * Assembles a single file, independent of the full-project build - used
+	 * by the Local Files tree's per-file "Assemble" action.
+	 */
+	async assembleFile(filePath: string): Promise<boolean> {
+		this.buildChannel.clear();
+		this.buildChannel.show();
+
+		const workspaceDir = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? path.dirname(filePath);
+		const settings = vscode.workspace.getConfiguration('cpmIde');
+		const assembler = settings.get<string>('assembler') || 'z80asm';
+
+		try {
+			this.buildChannel.appendLine(`CP/M Assemble: ${path.basename(filePath)}`);
+			this.buildChannel.appendLine('');
+			await this.buildAssemblyFile(filePath, assembler, workspaceDir);
+			vscode.window.showInformationMessage(`Assembled ${path.basename(filePath)}`);
+			return true;
+		} catch (error) {
+			this.buildChannel.appendLine(`Assemble failed: ${error}`);
+			vscode.window.showErrorMessage(`Assemble failed: ${error}`);
+			return false;
+		}
+	}
+
+	/**
+	 * Compiles a single file, independent of the full-project build - used
+	 * by the Local Files tree's per-file "Compile" action.
+	 */
+	async compileFile(filePath: string): Promise<boolean> {
+		this.buildChannel.clear();
+		this.buildChannel.show();
+
+		const workspaceDir = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? path.dirname(filePath);
+		const settings = vscode.workspace.getConfiguration('cpmIde');
+		const compiler = settings.get<string>('compiler') || 'cc';
+
+		try {
+			this.buildChannel.appendLine(`CP/M Compile: ${path.basename(filePath)}`);
+			this.buildChannel.appendLine('');
+			await this.buildCFile(filePath, compiler, workspaceDir);
+			vscode.window.showInformationMessage(`Compiled ${path.basename(filePath)}`);
+			return true;
+		} catch (error) {
+			this.buildChannel.appendLine(`Compile failed: ${error}`);
+			vscode.window.showErrorMessage(`Compile failed: ${error}`);
+			return false;
+		}
+	}
+
+	private findMakefile(workspaceDir: string): string | undefined {
+		for (const name of ['Makefile', 'makefile']) {
+			const candidate = path.join(workspaceDir, name);
+			if (fs.existsSync(candidate)) {
+				return candidate;
+			}
+		}
+		return undefined;
+	}
+
+	private async runMake(makeCommand: string, makefilePath: string, workspaceDir: string): Promise<boolean> {
+		this.buildChannel.appendLine('CP/M Build Started (Make)');
+		this.buildChannel.appendLine(`Workspace: ${workspaceDir}`);
+		this.buildChannel.appendLine(`Makefile: ${makefilePath}`);
+		this.buildChannel.appendLine('');
+		this.buildChannel.appendLine(`Command: ${makeCommand}`);
+
+		return new Promise((resolve) => {
+			cp.exec(makeCommand, { cwd: workspaceDir }, (error, stdout, stderr) => {
+				if (stdout) {
+					this.buildChannel.appendLine(stdout);
+				}
+				if (stderr) {
+					this.buildChannel.appendLine(stderr);
+				}
+
+				if (error) {
+					this.buildChannel.appendLine(`Build failed: ${error}`);
+					vscode.window.showErrorMessage(`Build failed: ${error}`);
+					resolve(false);
+				} else {
+					this.buildChannel.appendLine('');
+					this.buildChannel.appendLine('Build completed successfully');
+					vscode.window.showInformationMessage('CP/M build completed');
+					resolve(true);
+				}
+			});
+		});
 	}
 
 	private async buildAssemblyFile(asmFile: string, assembler: string, workspaceDir: string): Promise<void> {

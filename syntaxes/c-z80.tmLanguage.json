@@ -1,0 +1,111 @@
+{
+  "scopeName": "source.c.z80",
+  "name": "C (Z80)",
+  "patterns": [
+    { "include": "#asm-block" },
+    { "include": "#comment" },
+    { "include": "#preprocessor" },
+    { "include": "#string" },
+    { "include": "#char" },
+    { "include": "#number" },
+    { "include": "#storage-keyword" },
+    { "include": "#control-keyword" },
+    { "include": "#sdcc-keyword" },
+    { "include": "#function-call" },
+    { "include": "#operator" }
+  ],
+  "repository": {
+    "asm-block": {
+      "comment": "SDCC inline assembly - the body is handed off to the Z80/8080 grammar (source.asm.z80), which also covers classic 8080 mnemonics.",
+      "begin": "\\b(__asm)\\b",
+      "beginCaptures": {
+        "1": { "name": "keyword.control.asm.c" }
+      },
+      "end": "\\b(__endasm)\\b;?",
+      "endCaptures": {
+        "1": { "name": "keyword.control.asm.c" }
+      },
+      "name": "meta.embedded.block.asm.c",
+      "patterns": [
+        { "include": "source.asm.z80" }
+      ]
+    },
+    "comment": {
+      "patterns": [
+        {
+          "match": "//.*",
+          "name": "comment.line.double-slash.c"
+        },
+        {
+          "begin": "/\\*",
+          "end": "\\*/",
+          "name": "comment.block.c"
+        }
+      ]
+    },
+    "preprocessor": {
+      "patterns": [
+        {
+          "match": "^\\s*#\\s*include\\s*(<[^>]*>|\"[^\"]*\")",
+          "name": "meta.preprocessor.include.c",
+          "captures": {
+            "1": { "name": "string.quoted.other.lt-gt.include.c" }
+          }
+        },
+        {
+          "match": "^\\s*#\\s*(define|undef|ifdef|ifndef|if|elif|else|endif|pragma|error|warning|line)\\b",
+          "name": "keyword.control.directive.c"
+        }
+      ]
+    },
+    "string": {
+      "match": "\"(?:[^\"\\\\]|\\\\.)*\"",
+      "name": "string.quoted.double.c"
+    },
+    "char": {
+      "match": "'(?:[^'\\\\]|\\\\.)'",
+      "name": "string.quoted.single.c"
+    },
+    "number": {
+      "patterns": [
+        {
+          "match": "\\b0[xX][0-9a-fA-F]+\\b",
+          "name": "constant.numeric.hex.c"
+        },
+        {
+          "match": "\\b0[0-7]+\\b",
+          "name": "constant.numeric.octal.c"
+        },
+        {
+          "match": "\\b[0-9]+\\.[0-9]+(?:[eE][+-]?[0-9]+)?[fFlL]?\\b",
+          "name": "constant.numeric.float.c"
+        },
+        {
+          "match": "\\b[0-9]+[uUlL]*\\b",
+          "name": "constant.numeric.decimal.c"
+        }
+      ]
+    },
+    "storage-keyword": {
+      "match": "\\b(?:void|char|short|int|long|float|double|signed|unsigned|struct|union|enum|typedef|const|volatile|static|extern|register|auto|sizeof)\\b",
+      "name": "storage.type.c"
+    },
+    "control-keyword": {
+      "match": "\\b(?:if|else|switch|case|default|while|do|for|break|continue|return|goto)\\b",
+      "name": "keyword.control.c"
+    },
+    "sdcc-keyword": {
+      "comment": "SDCC-specific storage class/attribute keywords, commonly used alongside __asm in CP/M/Z80 C sources.",
+      "match": "\\b(?:__sfr|__at|__interrupt|__critical|__naked|__banked|__nonbanked|__reentrant|__using|__data|__xdata|__idata|__pdata|__code|__near|__far)\\b",
+      "name": "storage.modifier.sdcc.c"
+    },
+    "function-call": {
+      "match": "\\b([a-zA-Z_][a-zA-Z0-9_]*)\\s*(?=\\()",
+      "name": "entity.name.function.c"
+    },
+    "operator": {
+      "match": "[+\\-*/%=<>!&|^~?:]",
+      "name": "keyword.operator.c"
+    }
+  }
+}

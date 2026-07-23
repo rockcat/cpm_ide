@@ -2,12 +2,12 @@
   "name": "cpm-ide",
   "displayName": "CP/M IDE",
   "description": "VS Code extension for CP/M application development with serial terminal and file transfer",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "rockcat",
   "engines": {
     "vscode": "^1.80.0"
   },
-    "repository": {
+  "repository": {
     "type": "git",
     "url": "git+https://github.com/rockcat/cpm-ide.git"
   },
@@ -26,7 +26,9 @@
   "activationEvents": [
     "onLanguage:asm-z80",
     "onCommand:cpm-ide.openSerialTerminal",
-    "onView:cpmFilesExplorer"
+    "onCommand:cpm-ide.transferLocalFileToDevice",
+    "onView:cpmFilesExplorer",
+    "onView:cpmLocalFilesExplorer"
   ],
   "contributes": {
     "languages": [
@@ -38,10 +40,18 @@
         ],
         "extensions": [
           ".asm",
+          ".a",
           ".s",
           ".z80"
         ],
         "configuration": "./language-configuration.json"
+      },
+      {
+        "id": "c-z80",
+        "aliases": [
+          "C (Z80)"
+        ],
+        "configuration": "./c-z80-language-configuration.json"
       }
     ],
     "grammars": [
@@ -49,12 +59,18 @@
         "language": "asm-z80",
         "scopeName": "source.asm.z80",
         "path": "./syntaxes/z80.tmLanguage.json"
+      },
+      {
+        "language": "c-z80",
+        "scopeName": "source.c.z80",
+        "path": "./syntaxes/c-z80.tmLanguage.json"
       }
     ],
     "commands": [
       {
         "command": "cpm-ide.openSerialTerminal",
-        "title": "CP/M IDE: Open CP/M Serial Terminal"
+        "title": "CP/M IDE: Open CP/M Serial Terminal",
+        "icon": "$(plug)"
       },
       {
         "command": "cpm-ide.configureSerialPort",
@@ -62,20 +78,77 @@
       },
       {
         "command": "cpm-ide.transferFileToDevice",
-        "title": "CP/M IDE: Transfer File to CP/M Device"
+        "title": "CP/M IDE: Auto Send File",
+        "icon": "$(cloud-upload)",
+        "enablement": "cpmIde.connected"
+      },
+      {
+        "command": "cpm-ide.transferLocalFileToDevice",
+        "title": "CP/M IDE: Auto Send File",
+        "icon": "$(cloud-upload)",
+        "enablement": "cpmIde.connected"
+      },
+      {
+        "command": "cpm-ide.transferFileToDeviceFromTree",
+        "title": "CP/M IDE: Auto Send File",
+        "icon": "$(cloud-upload)",
+        "enablement": "cpmIde.connected"
+      },
+      {
+        "command": "cpm-ide.sendFilesSlide",
+        "title": "CP/M IDE: Send (Slide)",
+        "icon": "$(send)",
+        "enablement": "cpmIde.connected"
       },
       {
         "command": "cpm-ide.transferFileFromDevice",
-        "title": "CP/M IDE: Transfer File from CP/M Device",
-        "icon": "$(cloud-download)"
+        "title": "CP/M IDE: Auto Receive File",
+        "icon": "$(cloud-download)",
+        "enablement": "cpmIde.connected"
+      },
+      {
+        "command": "cpm-ide.receiveXmodemManual",
+        "title": "CP/M IDE: Manual Receive (XMODEM)",
+        "icon": "$(arrow-down)",
+        "enablement": "cpmIde.connected"
+      },
+      {
+        "command": "cpm-ide.sendXmodemManual",
+        "title": "CP/M IDE: Manual Send (XMODEM)",
+        "icon": "$(arrow-up)",
+        "enablement": "cpmIde.connected"
+      },
+      {
+        "command": "cpm-ide.sendXmodemManualFromTree",
+        "title": "CP/M IDE: Manual Send (XMODEM)",
+        "icon": "$(arrow-up)",
+        "enablement": "cpmIde.connected"
       },
       {
         "command": "cpm-ide.buildProject",
-        "title": "Build CP/M Project"
+        "title": "CP/M IDE: Build Project"
+      },
+      {
+        "command": "cpm-ide.assembleFile",
+        "title": "CP/M IDE: Assemble",
+        "icon": "$(tools)",
+        "enablement": "cpmIde.assemblerConfigured"
+      },
+      {
+        "command": "cpm-ide.compileFile",
+        "title": "CP/M IDE: Compile",
+        "icon": "$(tools)",
+        "enablement": "cpmIde.compilerConfigured"
       },
       {
         "command": "cpm-ide.refreshFileExplorer",
         "title": "CP/M IDE: Refresh CP/M Files",
+        "icon": "$(refresh)",
+        "enablement": "cpmIde.connected"
+      },
+      {
+        "command": "cpm-ide.refreshLocalFileExplorer",
+        "title": "CP/M IDE: Refresh Local Files",
         "icon": "$(refresh)"
       },
       {
@@ -83,27 +156,97 @@
         "title": "CP/M IDE: Run Serial Comms Test (DIR)"
       }
     ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "cpmIdeSidebar",
+          "title": "CP/M IDE",
+          "icon": "media/cpm-ide.svg"
+        }
+      ]
+    },
     "views": {
-      "explorer": [
+      "cpmIdeSidebar": [
         {
           "id": "cpmFilesExplorer",
           "name": "CP/M Files"
+        },
+        {
+          "id": "cpmLocalFilesExplorer",
+          "name": "Local Files"
         }
       ]
     },
     "menus": {
       "view/title": [
         {
-          "command": "cpm-ide.refreshFileExplorer",
+          "command": "cpm-ide.openSerialTerminal",
           "when": "view == cpmFilesExplorer",
+          "group": "navigation@1"
+        },
+        {
+          "command": "cpm-ide.refreshFileExplorer",
+          "when": "view == cpmFilesExplorer && cpmIde.connected",
+          "group": "navigation"
+        },
+        {
+          "command": "cpm-ide.receiveXmodemManual",
+          "when": "view == cpmFilesExplorer && cpmIde.connected",
+          "group": "navigation"
+        },
+        {
+          "command": "cpm-ide.refreshLocalFileExplorer",
+          "when": "view == cpmLocalFilesExplorer",
+          "group": "navigation"
+        },
+        {
+          "command": "cpm-ide.sendXmodemManual",
+          "when": "view == cpmLocalFilesExplorer && cpmIde.connected",
           "group": "navigation"
         }
       ],
       "view/item/context": [
         {
           "command": "cpm-ide.transferFileFromDevice",
-          "when": "view == cpmFilesExplorer && viewItem == cpmFile",
+          "when": "view == cpmFilesExplorer && viewItem == cpmFile && cpmIde.connected",
           "group": "inline"
+        },
+        {
+          "command": "cpm-ide.transferFileToDeviceFromTree",
+          "when": "view == cpmLocalFilesExplorer && viewItem =~ /^localFile/ && cpmIde.connected",
+          "group": "inline"
+        },
+        {
+          "command": "cpm-ide.sendXmodemManualFromTree",
+          "when": "view == cpmLocalFilesExplorer && viewItem =~ /^localFile/ && cpmIde.connected",
+          "group": "inline"
+        },
+        {
+          "command": "cpm-ide.assembleFile",
+          "when": "view == cpmLocalFilesExplorer && viewItem == localFile-asm && cpmIde.assemblerConfigured",
+          "group": "inline"
+        },
+        {
+          "command": "cpm-ide.compileFile",
+          "when": "view == cpmLocalFilesExplorer && viewItem == localFile-c && cpmIde.compilerConfigured",
+          "group": "inline"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "cpm-ide.transferFileToDevice",
+          "when": "resourceScheme == file && explorerResourceIsFolder == false && cpmIde.connected",
+          "group": "inline"
+        },
+        {
+          "command": "cpm-ide.transferFileToDevice",
+          "when": "resourceScheme == file && explorerResourceIsFolder == false && cpmIde.connected",
+          "group": "navigation"
+        },
+        {
+          "command": "cpm-ide.transferLocalFileToDevice",
+          "when": "resourceScheme == file && explorerResourceIsFolder == false && cpmIde.connected",
+          "group": "navigation"
         }
       ]
     },
@@ -161,6 +304,16 @@
           "type": "boolean",
           "default": false,
           "description": "Log every byte sent/received over the CP/M serial connection as a hex dump to the \"CP/M IDE: Serial Trace\" output channel. Useful for diagnosing comms issues; noisy otherwise."
+        },
+        "cpmIde.forceCapitals": {
+          "type": "boolean",
+          "default": true,
+          "description": "Force all input to be converted to uppercase in the CP/M terminal."
+        },
+        "cpmIde.textColor": {
+          "type": "string",
+          "default": "#cccccc",
+          "description": "Text color for the CP/M terminal output."
         },
         "cpmIde.terminalSize": {
           "type": "string",
@@ -224,6 +377,11 @@
           "type": "string",
           "default": "",
           "description": "SDCC-specific command-line flags"
+        },
+        "cpmIde.makeCommand": {
+          "type": "string",
+          "default": "",
+          "description": "Command to run for Make-based builds (e.g. 'make', 'mingw32-make -f Custom.mk'). If set and a Makefile/makefile is found in the workspace root, Build Project runs this instead of assembling/compiling files individually. Leave empty to always use the per-file build."
         }
       }
     }
