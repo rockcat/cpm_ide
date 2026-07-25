@@ -84,7 +84,7 @@ export class SerialTerminalPanel {
 				case 'updateSetting': {
 					const allowedKeys = [
 						'serialPort', 'baudRate', 'dataBits', 'stopBits', 'parity',
-						'flowControl', 'enableSerialTrace', 'forceCapitals', 'terminalSize', 'textColor'
+						'flowControl', 'enableSerialTrace', 'forceCapitals', 'terminalSize', 'textColor', 'target'
 					];
 					if (allowedKeys.includes(msg.key)) {
 						await vscode.workspace.getConfiguration('cpmIde')
@@ -178,6 +178,7 @@ export class SerialTerminalPanel {
 			forceCapitals: settings.get<boolean>('forceCapitals') ?? true,
 			terminalSize: settings.get<string>('terminalSize') ?? '80x25',
 			textColor: settings.get<string>('textColor') ?? '#cccccc',
+			target: settings.get<string>('target') ?? 'Generic',
 		};
 	}
 

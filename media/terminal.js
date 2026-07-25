@@ -20,6 +20,7 @@
       { value: 'rtscts', label: 'RTS/CTS' },
     ];
     const TERMINAL_SIZES = ['80x25', '64x16', '40x24', '52x24'];
+    const TARGETS = ['Generic', 'MicroBeast'];
 
     function populateSelect(id, values, currentValue, labelFor) {
       const sel = $(id);
@@ -52,6 +53,7 @@
       populateSelect('parity', PARITIES, settings.parity);
       populateSelect('flowcontrol', FLOW_CONTROLS, settings.flowControl, f => f.label);
       populateSelect('termsize', TERMINAL_SIZES, settings.terminalSize);
+      populateSelect('target', TARGETS, settings.target);
       $('trace-toggle').checked = !!settings.enableSerialTrace;
       $('force-caps').checked = !!settings.forceCapitals;
       $('text-color').value = settings.textColor || '#cccccc';
@@ -81,6 +83,7 @@
       resizeGrid();
       applyTerminalSize();
     });
+    $('target').addEventListener('change', () => saveSetting('target', $('target').value));
 
     // Scales the terminal's font size so the chosen COLSxROWS character grid
     // fits the panel's currently available space, without overflowing

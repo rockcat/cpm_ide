@@ -3,7 +3,7 @@
   "displayName": "CP/M IDE",
   "icon": "media/icon.png",
   "description": "VS Code extension for CP/M application development with serial terminal and file transfer",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "publisher": "rockcat",
   "engines": {
     "vscode": "^1.80.0"
@@ -332,6 +332,15 @@
               "52x24"
             ],
             "description": "Fixed character grid for the CP/M terminal display. The font size is scaled to fit this many columns/rows into the available panel space."
+          },
+          "cpmIde.target": {
+            "type": "string",
+            "default": "Generic",
+            "enum": [
+              "Generic",
+              "MicroBeast"
+            ],
+            "description": "Target CP/M hardware. MicroBeast requires running ALWRITE after Remote CCP (REMOTCCP.COM) is successfully installed on the device."
           }
         }
       },

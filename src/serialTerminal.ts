@@ -586,22 +586,26 @@ export class SerialTerminal {
 
 	/**
 	 * Installs REMOTCCP.COM onto A: for the first time, after asking the
-	 * user. Tries three methods in order, each falling back to the next on
+	 * user. Tries four methods in order, each falling back to the next on
 	 * failure or missing prerequisites:
 	 *
-	 * 1. ED (installRemoteCcpViaEd) - inserting text through ED.COM's line
+	 * 1. XMODEM (installRemoteCcpViaXmodem) - block checksums and ACK/NAK
+	 *    retries built into the protocol itself, rather than this code
+	 *    having to work around hardware quirks after the fact. Tried first
+	 *    for exactly that reason.
+	 * 2. ED (installRemoteCcpViaEd) - inserting text through ED.COM's line
 	 *    editor is driven entirely through the console, the same path
 	 *    DIR/STAT/LOAD/etc. already use reliably throughout this file, so it
-	 *    never touches RDR: (the reader device) at all. Tried first since it
-	 *    sidesteps RDR:'s hardware-specific quirks rather than working
-	 *    around any one of them.
-	 * 2. Intel HEX via PIP (installRemoteCcpViaHex) - text-mode PIP,
+	 *    never touches RDR: (the reader device) at all - sidesteps RDR:'s
+	 *    hardware-specific quirks rather than working around any one of
+	 *    them.
+	 * 3. Intel HEX via PIP (installRemoteCcpViaHex) - text-mode PIP,
 	 *    checksummed per line, one record at a time. Still goes through
 	 *    RDR:, but text mode has proven more reliable than raw binary.
-	 * 3. Raw binary via PIP's object mode ("[O]") - the original approach;
-	 *    has proven the least reliable of the three on real hardware, kept
-	 *    only as a last resort for devices without ED.COM or LOAD.COM/
-	 *    PIP.COM available for the other two.
+	 * 4. Raw binary via PIP's object mode ("[O]") - the original approach;
+	 *    has proven the least reliable of all four on real hardware, kept
+	 *    only as a last resort for devices without any of XMODEM.COM,
+	 *    ED.COM+LOAD.COM, or LOAD.COM+PIP.COM available.
 	 */
 	private async bootstrapRemoteCcp(): Promise<boolean> {
 		const comPath = this.context.asAbsolutePath(path.join('remote', 'remotccp.com'));
@@ -620,34 +624,80 @@ export class SerialTerminal {
 			return false;
 		}
 
+		let installed = false;
+
+		// XMODEM's own block-level checksums and retries are specifically
+		// designed to cope with an unreliable link, rather than this code
+		// having to detect and route around hardware quirks after the fact
+		// like every other method below - tried first for exactly that
+		// reason.
+		if (await this.canInstallRemoteCcpViaXmodem()) {
+			installed = await this.installRemoteCcpViaXmodem();
+			if (!installed) {
+				this._onActivity.fire('XMODEM install failed - trying ED…');
+			}
+		}
+
 		// ED never touches RDR: - inserting text is driven entirely through
 		// the console, the same path DIR/STAT/LOAD/etc. already use
 		// reliably throughout this file - so it sidesteps the hardware-
 		// specific RDR: quirks (echoed transfers replaying as fake
 		// keystrokes, PIP outright aborting) the other two methods below
 		// have both hit, rather than working around any one of them.
-		if (await this.canInstallRemoteCcpViaEd()) {
-			if (await this.installRemoteCcpViaEd()) {
-				return true;
+		if (!installed && await this.canInstallRemoteCcpViaEd()) {
+			installed = await this.installRemoteCcpViaEd();
+			if (!installed) {
+				this._onActivity.fire('ED install failed - trying Intel HEX via PIP…');
 			}
-			this._onActivity.fire('ED install failed - trying Intel HEX via PIP…');
 		}
 
 		// Raw binary through PIP's [O] mode has proven unreliable on real
 		// hardware - prefer text-mode PIP + LOAD (Intel HEX, checksummed
 		// per line) whenever both are available, and only fall back further
 		// if they're missing or the hex install itself fails.
-		if (await this.canInstallRemoteCcpViaHex()) {
-			if (await this.installRemoteCcpViaHex()) {
-				return true;
+		if (!installed && await this.canInstallRemoteCcpViaHex()) {
+			installed = await this.installRemoteCcpViaHex();
+			if (!installed) {
+				this._onActivity.fire('Intel HEX install via PIP failed - falling back to raw binary PIP transfer…');
 			}
-			this._onActivity.fire('Intel HEX install via PIP failed - falling back to raw binary PIP transfer…');
 		}
 
-		await this.sendRemoteCcpPipReceiveCommand();
-		// Give the CCP a moment to load and launch PIP before streaming.
-		await new Promise(resolve => setTimeout(resolve, 300));
-		return await this.streamRemoteCcpFileRaw();
+		if (!installed) {
+			await this.sendRemoteCcpPipReceiveCommand();
+			// Give the CCP a moment to load and launch PIP before streaming.
+			await new Promise(resolve => setTimeout(resolve, 300));
+			installed = await this.streamRemoteCcpFileRaw();
+		}
+
+		if (installed) {
+			await this.runTargetPostInstallHook();
+		}
+		return installed;
+	}
+
+	/**
+	 * Runs whatever extra step a non-Generic target (cpmIde.target) needs
+	 * right after REMOTCCP.COM has been confirmed installed. Currently only
+	 * MicroBeast needs this: it requires ALWRITE to be run afterward. Must
+	 * be called from within withExclusiveAccess.
+	 */
+	private async runTargetPostInstallHook(): Promise<void> {
+		const target = vscode.workspace.getConfiguration('cpmIde').get<string>('target') ?? 'Generic';
+		if (target !== 'MicroBeast') {
+			return;
+		}
+
+		this._onActivity.fire('MicroBeast target - running ALWRITE…');
+		await this.selectDrive('A');
+		const start = this.inputBuffer.length;
+		this.writeRaw('ALWRITE\r');
+		await this.waitForPrompt(start, 15000);
+		await this.waitForIdle(500, 5000);
+
+		const response = this.inputBuffer.slice(start);
+		this._onActivity.fire(/error/i.test(response)
+			? `ALWRITE reported an error: ${response.trim()}`
+			: 'ALWRITE completed');
 	}
 
 	/** LOAD.COM and PIP.COM must both already be on A: for the Intel HEX install path. */
@@ -800,9 +850,57 @@ export class SerialTerminal {
 		return sent && await this.hasFileOnDrive(drive, fileName);
 	}
 
-	/** ED.COM must already be on A: for the ED-based install path. */
+	/** XMODEM.COM must already be on A: for the XMODEM-based install path. */
+	private async canInstallRemoteCcpViaXmodem(): Promise<boolean> {
+		return await this.hasFileOnDrive('A', 'XMODEM.COM');
+	}
+
+	/**
+	 * Installs REMOTCCP.COM onto A: via XMODEM instead of PIP or ED. Unlike
+	 * every other install path in this file, XMODEM's own block-level
+	 * checksums and ACK/NAK retries are specifically designed to cope with
+	 * an unreliable link, rather than this code having to work around
+	 * hardware quirks after the fact - tried first for exactly that reason.
+	 * Requires canInstallRemoteCcpViaXmodem() to have already confirmed
+	 * XMODEM.COM is present. Must be called from within withExclusiveAccess.
+	 */
+	private async installRemoteCcpViaXmodem(): Promise<boolean> {
+		const comPath = this.context.asAbsolutePath(path.join('remote', 'remotccp.com'));
+		let fileContent: Buffer;
+		try {
+			fileContent = fs.readFileSync(comPath);
+		} catch (error) {
+			this._onActivity.fire(`Remote CCP install failed: couldn't read bundled ${REMOTE_CCP_FILENAME}`);
+			return false;
+		}
+
+		await this.selectDrive('A');
+		this._onActivity.fire(`Sending ${REMOTE_CCP_FILENAME} via XMODEM…`);
+		// No /F here (unlike the regular file-transfer path) - this only
+		// ever runs when REMOTCCP.COM is confirmed missing (see
+		// ensureRemoteCcpOnDrive), so there's nothing to overwrite and no
+		// "Overwrite (Y/N)?" prompt to skip.
+		this.writeRaw(`XMODEM ${REMOTE_CCP_FILENAME} /R\r`);
+		// Give the CCP a moment to load and launch XMODEM.COM before we send.
+		await new Promise(resolve => setTimeout(resolve, 300));
+
+		try {
+			await this.xmodem.send(this.getSerialLink(), fileContent, REMOTE_CCP_FILENAME);
+		} catch (error) {
+			this._onActivity.fire(`XMODEM send failed: ${error instanceof Error ? error.message : error} - leaving any partial ${REMOTE_CCP_FILENAME} in place for inspection`);
+			return false;
+		}
+
+		const installed = await this.hasFileOnDrive('A', REMOTE_CCP_FILENAME);
+		this._onActivity.fire(installed
+			? `${REMOTE_CCP_FILENAME} installed on A: via XMODEM`
+			: `XMODEM send completed but ${REMOTE_CCP_FILENAME} could not be verified`);
+		return installed;
+	}
+
+	/** ED.COM and LOAD.COM must both already be on A: for the ED-based install path. */
 	private async canInstallRemoteCcpViaEd(): Promise<boolean> {
-		return await this.hasFileOnDrive('A', 'ED.COM');
+		return await this.hasFileOnDrive('A', 'ED.COM') && await this.hasFileOnDrive('A', 'LOAD.COM');
 	}
 
 	/**
