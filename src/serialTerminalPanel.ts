@@ -92,6 +92,28 @@ export class SerialTerminalPanel {
 					}
 					break;
 				}
+				case 'setRemoteCcpDisabled':
+					this.serialTerminal.setRemoteCcpDisabled(!!msg.value);
+					break;
+				case 'sendRemoteCcp': {
+					const choice = await vscode.window.showWarningMessage(
+						'Manually drive the Remote CCP (REMOTCCP.COM) install handshake on A:. Use this to retry ' +
+						'after a declined/failed auto-install, or to step through it by hand.',
+						{ modal: true },
+						'Send PIP command',
+						'SEND RemotCCP'
+					);
+					try {
+						if (choice === 'Send PIP command') {
+							await this.serialTerminal.sendRemoteCcpPipCommand();
+						} else if (choice === 'SEND RemotCCP') {
+							await this.serialTerminal.sendRemoteCcpRaw();
+						}
+					} catch (err) {
+						vscode.window.showErrorMessage(`Remote CCP send failed: ${err}`);
+					}
+					break;
+				}
 			}
 		}, null, this._disposables);
 
@@ -105,7 +127,11 @@ export class SerialTerminalPanel {
 			});
 		}
 
-		this._panel.webview.postMessage({ command: 'init', settings: this.getCurrentSettings() });
+		this._panel.webview.postMessage({
+			command: 'init',
+			settings: this.getCurrentSettings(),
+			remoteCcpDisabled: this.serialTerminal.isRemoteCcpDisabled,
+		});
 
 		this._disposables.push(
 			this.serialTerminal.onData(text => {

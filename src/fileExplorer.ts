@@ -53,13 +53,16 @@ export class CpmFileExplorer implements vscode.TreeDataProvider<CpmDriveItem | C
 		this._onDidChangeTreeData.fire(undefined);
 	}
 
-	private storeFileList(drive: string, files: string[]): void {
-		const cpmFiles = files.map(f => ({
+	private toCpmFiles(drive: string, files: string[]): CpmFile[] {
+		return files.map(f => ({
 			name: f,
 			drive: drive,
 			type: f.split('.')[1] || 'FILE',
 		}));
-		this.drives.set(drive, cpmFiles);
+	}
+
+	private storeFileList(drive: string, files: string[]): void {
+		this.drives.set(drive, this.toCpmFiles(drive, files));
 	}
 
 	private async loadDrivesAndFiles() {
@@ -70,22 +73,31 @@ export class CpmFileExplorer implements vscode.TreeDataProvider<CpmDriveItem | C
 		await this.serialTerminal.withExclusiveAccess('Refreshing CP/M file list…', async () => {
 			const viaRemoteCcp = await this.serialTerminal.scanDrivesAndFilesViaRemoteCcp();
 			if (viaRemoteCcp) {
+				// Rebuild from scratch and swap in at the end, rather than
+				// merging into the existing map, so a drive that has gone
+				// away (or failed) since the last scan doesn't linger with
+				// its stale file list.
+				const scanned = new Map<string, CpmFile[]>();
 				for (const [drive, files] of viaRemoteCcp) {
-					this.storeFileList(drive, files);
+					scanned.set(drive, this.toCpmFiles(drive, files));
 				}
+				this.drives = scanned;
 				return;
 			}
 
 			// Remote CCP unavailable - fall back to the CCP-command approach.
 			const drives = await this.serialTerminal.scanDrives();
+			const scanned = new Map<string, CpmFile[]>();
 			for (const drive of drives) {
 				try {
 					const files = await this.serialTerminal.getDirListing(drive);
-					this.storeFileList(drive, files);
+					scanned.set(drive, this.toCpmFiles(drive, files));
 				} catch (error) {
-					// Skip this drive and keep listing the rest.
+					// Drive no longer responds to a DIR listing - drop it
+					// rather than keeping its last-known file list around.
 				}
 			}
+			this.drives = scanned;
 		});
 	}
 

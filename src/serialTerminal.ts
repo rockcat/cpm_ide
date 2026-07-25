@@ -7,6 +7,7 @@ import { formatHexDump } from './hexDump';
 import { parseDirResponse } from './cpmDirParser';
 import { SerialSession, sendFiles } from './slide-ts';
 import { RemoteCcpClient, RemoteCcpFile } from './remoteCcp';
+import { toIntelHex } from './intelHex';
 
 /** Filename Remote CCP is bootstrapped/looked up under - 8 chars, CP/M's limit ("REMOTECCP" doesn't fit). */
 const REMOTE_CCP_FILENAME = 'REMOTCCP.COM';
@@ -35,6 +36,16 @@ export class SerialTerminal {
 	 * to be unavailable.
 	 */
 	private remoteCcpAvailable: boolean | undefined;
+	/**
+	 * Manual user override that blocks Remote CCP from being launched or
+	 * installed by the automatic drive-scan/file-listing/transfer paths.
+	 * Unlike remoteCcpAvailable, this is a deliberate choice rather than a
+	 * detection result, so it does NOT reset on reconnect - it stays off
+	 * until the user turns it back on. The manual "Send REMOTCCP" actions
+	 * bypass this flag entirely, since triggering them IS the user asking
+	 * for Remote CCP traffic despite the toggle.
+	 */
+	private remoteCcpDisabled = false;
 	/** "CP/M X.Y", learned from Remote CCP's startup version byte - undefined until first learned, reset on reconnect. */
 	private cpmVersion: string | undefined;
 
@@ -72,6 +83,17 @@ export class SerialTerminal {
 
 	get isOpen(): boolean {
 		return this.port?.isOpen ?? false;
+	}
+
+	get isRemoteCcpDisabled(): boolean {
+		return this.remoteCcpDisabled;
+	}
+
+	setRemoteCcpDisabled(disabled: boolean): void {
+		this.remoteCcpDisabled = disabled;
+		this._onActivity.fire(disabled
+			? 'Remote CCP disabled - falling back to legacy CCP-command path'
+			: 'Remote CCP re-enabled');
 	}
 
 	/** "CP/M X.Y" once learned from a Remote CCP session's startup byte, else undefined. */
@@ -228,6 +250,25 @@ export class SerialTerminal {
 				this.log.appendLine(`[${new Date().toISOString()}] TX ${formatHexDump(buffer)}`);
 			}
 			this.port.write(data);
+		}
+	}
+
+	/**
+	 * Writes `data` in small chunks with a short pause between each, instead
+	 * of one `writeRaw()` blast. On at least one piece of real hardware, the
+	 * console's echo path lags noticeably behind actual reception - a full
+	 * file blasted in one write gets received fine, but its echo keeps
+	 * trickling out for seconds afterward, right through whatever prompt or
+	 * command is sent next (corrupting it). Pacing the send keeps the
+	 * device's echo caught up in something close to real time so there's no
+	 * backlog left to collide with what comes after - used for PIP transfers
+	 * (raw binary and Intel HEX) rather than XMODEM/Remote CCP's own
+	 * block-at-a-time protocols, which already pace themselves via ACKs.
+	 */
+	private async writeRawPaced(data: Buffer, chunkBytes = 64, delayMs = 30): Promise<void> {
+		for (let offset = 0; offset < data.length; offset += chunkBytes) {
+			this.writeRaw(data.subarray(offset, offset + chunkBytes));
+			await new Promise(resolve => setTimeout(resolve, delayMs));
 		}
 	}
 
@@ -572,11 +613,8 @@ export class SerialTerminal {
 	 */
 	private async bootstrapRemoteCcp(): Promise<boolean> {
 		const comPath = this.context.asAbsolutePath(path.join('remote', 'remotccp.com'));
-		let fileContent: Buffer;
-		try {
-			fileContent = fs.readFileSync(comPath);
-		} catch (error) {
-			this._onActivity.fire(`Remote CCP bootstrap failed: couldn't read bundled ${REMOTE_CCP_FILENAME}`);
+		if (!fs.existsSync(comPath)) {
+			this._onActivity.fire(`Remote CCP bootstrap failed: couldn't find bundled ${REMOTE_CCP_FILENAME}`);
 			return false;
 		}
 
@@ -590,22 +628,139 @@ export class SerialTerminal {
 			return false;
 		}
 
-		this._onActivity.fire(`Installing ${REMOTE_CCP_FILENAME} on A: via PIP…`);
+		// Raw binary through PIP's [O] mode has proven unreliable on real
+		// hardware - prefer text-mode PIP + LOAD (Intel HEX, checksummed
+		// per line) whenever both are available, and only fall back to the
+		// raw path if they're missing or the hex install itself fails.
+		if (await this.canInstallRemoteCcpViaHex()) {
+			if (await this.installRemoteCcpViaHex()) {
+				return true;
+			}
+			this._onActivity.fire('Intel HEX install failed - falling back to raw binary PIP transfer…');
+		}
+
+		await this.sendRemoteCcpPipReceiveCommand();
+		// Give the CCP a moment to load and launch PIP before streaming.
+		await new Promise(resolve => setTimeout(resolve, 300));
+		return await this.streamRemoteCcpFileRaw();
+	}
+
+	/** LOAD.COM and PIP.COM must both already be on A: for the Intel HEX install path. */
+	private async canInstallRemoteCcpViaHex(): Promise<boolean> {
+		return await this.hasFileOnDrive('A', 'LOAD.COM') && await this.hasFileOnDrive('A', 'PIP.COM');
+	}
+
+	/**
+	 * Installs REMOTCCP.COM onto A: via Intel HEX instead of raw binary:
+	 * binary -> Intel HEX text -> PIP (text mode, checksummed per line) ->
+	 * LOAD -> .COM. Requires canInstallRemoteCcpViaHex() to have already
+	 * confirmed LOAD.COM/PIP.COM are present. Must be called from within
+	 * withExclusiveAccess.
+	 */
+	private async installRemoteCcpViaHex(): Promise<boolean> {
+		const comPath = this.context.asAbsolutePath(path.join('remote', 'remotccp.com'));
+		let fileContent: Buffer;
+		try {
+			fileContent = fs.readFileSync(comPath);
+		} catch (error) {
+			this._onActivity.fire(`Remote CCP install failed: couldn't read bundled ${REMOTE_CCP_FILENAME}`);
+			return false;
+		}
+
+		const hexFileName = 'REMOTCCP.HEX';
+		const hexText = toIntelHex(fileContent);
+
+		this._onActivity.fire(`Sending ${hexFileName} (${fileContent.length} bytes as Intel HEX) via PIP…`);
 		await this.selectDrive('A');
-		this.writeRaw(`PIP A:${REMOTE_CCP_FILENAME}=RDR:[O]\r`);
+		this.writeRaw(`PIP A:${hexFileName}=RDR:\r`);
 		// Give the CCP a moment to load and launch PIP before streaming.
 		await new Promise(resolve => setTimeout(resolve, 300));
 
 		const start = this.inputBuffer.length;
-		this.writeRaw(fileContent);
+		await this.writeRawPaced(Buffer.from(hexText, 'ascii'));
+		// Trailing sentinel: standard CP/M text-file EOF marker for PIP
+		// reading from RDR:.
+		this.writeRaw(Buffer.from([0x1a]));
+
+		const sent = await this.waitForPrompt(start, 30000);
+		// The prompt showing up doesn't mean the echo backlog has actually
+		// drained (see writeRawPaced) - wait for it to go genuinely quiet
+		// before trusting the transfer is done, or the very next command
+		// (the DIR below) collides with its tail instead of getting a clean
+		// response.
+		await this.waitForIdle(1000, 10000);
+		if (!sent || !await this.hasFileOnDrive('A', hexFileName)) {
+			this._onActivity.fire(`${hexFileName} transfer could not be verified`);
+			return false;
+		}
+
+		this._onActivity.fire(`Converting ${hexFileName} to ${REMOTE_CCP_FILENAME} with LOAD…`);
+		const loadStart = this.inputBuffer.length;
+		this.writeRaw('LOAD REMOTCCP\r');
+		await this.waitForPrompt(loadStart, 15000);
+		await this.waitForIdle(500, 5000);
+
+		const installed = await this.hasFileOnDrive('A', REMOTE_CCP_FILENAME);
+		this._onActivity.fire(installed
+			? `${REMOTE_CCP_FILENAME} installed on A: via Intel HEX`
+			: `LOAD did not produce ${REMOTE_CCP_FILENAME}`);
+
+		if (installed) {
+			// Best-effort cleanup of the intermediate .HEX file - failure here
+			// doesn't affect whether the install itself succeeded.
+			this.writeRaw(`ERA A:${hexFileName}\r`);
+			await this.waitForIdle(300, 3000);
+		}
+
+		return installed;
+	}
+
+	/**
+	 * Sends the raw PIP command that puts A: into "receive REMOTCCP.COM over
+	 * the serial line" mode - the first half of the install handshake. Split
+	 * out from bootstrapRemoteCcp so the terminal's manual "Send REMOTCCP"
+	 * dialog can trigger each half independently (e.g. to retry after a
+	 * declined/failed auto-install, or to watch the handshake step by step).
+	 * Must be called from within withExclusiveAccess.
+	 */
+	private async sendRemoteCcpPipReceiveCommand(): Promise<void> {
+		this._onActivity.fire(`Sending PIP command to receive ${REMOTE_CCP_FILENAME} on A:…`);
+		await this.selectDrive('A');
+		this.writeRaw(`PIP A:${REMOTE_CCP_FILENAME}=RDR:[O]\r`);
+	}
+
+	/**
+	 * Streams the bundled REMOTCCP.COM's bytes raw over the serial line, for
+	 * a PIP receive already started (see sendRemoteCcpPipReceiveCommand) to
+	 * pick up. Second half of the install handshake, split out for the same
+	 * reason. Must be called from within withExclusiveAccess.
+	 */
+	private async streamRemoteCcpFileRaw(): Promise<boolean> {
+		const comPath = this.context.asAbsolutePath(path.join('remote', 'remotccp.com'));
+		let fileContent: Buffer;
+		try {
+			fileContent = fs.readFileSync(comPath);
+		} catch (error) {
+			this._onActivity.fire(`Remote CCP send failed: couldn't read bundled ${REMOTE_CCP_FILENAME}`);
+			return false;
+		}
+
+		this._onActivity.fire(`Sending ${REMOTE_CCP_FILENAME} (${fileContent.length} bytes) raw…`);
+		const start = this.inputBuffer.length;
+		await this.writeRawPaced(fileContent);
 		// Trailing sentinel: harmless whether or not [O] mode needs it, and
 		// the only signal available if it turns out RDR: has no EOF of its
 		// own for PIP to detect completion from.
 		this.writeRaw(Buffer.from([0x1a]));
 
 		const finished = await this.waitForPrompt(start, 30000);
+		// The prompt showing up doesn't mean the echo backlog has actually
+		// drained (see writeRawPaced) - wait for it to go genuinely quiet
+		// before trusting the transfer is done, or the verification DIR
+		// below collides with its tail instead of getting a clean response.
+		await this.waitForIdle(1000, 10000);
 		if (!finished) {
-			this._onActivity.fire('Remote CCP install timed out waiting for PIP to finish');
+			this._onActivity.fire('Remote CCP send timed out waiting for PIP to finish');
 			return false;
 		}
 
@@ -614,6 +769,36 @@ export class SerialTerminal {
 			? `${REMOTE_CCP_FILENAME} installed on A:`
 			: `${REMOTE_CCP_FILENAME} install could not be verified`);
 		return installed;
+	}
+
+	/**
+	 * Manually sends just the PIP receive command - the terminal's "Send PIP
+	 * command" action. Independent of remoteCcpDisabled: triggering this
+	 * action is the user explicitly asking for Remote CCP traffic regardless
+	 * of that toggle.
+	 */
+	async sendRemoteCcpPipCommand(): Promise<void> {
+		if (!this.port?.isOpen) {
+			throw new Error('Serial port not connected');
+		}
+		await this.withExclusiveAccess('Sending PIP command for Remote CCP…', async () => {
+			await this.sendRemoteCcpPipReceiveCommand();
+		});
+	}
+
+	/**
+	 * Manually streams REMOTCCP.COM's bytes raw - the terminal's "SEND
+	 * RemotCCP" action, for a PIP receive already started (typically via
+	 * sendRemoteCcpPipCommand). Independent of remoteCcpDisabled for the
+	 * same reason as sendRemoteCcpPipCommand.
+	 */
+	async sendRemoteCcpRaw(): Promise<boolean> {
+		if (!this.port?.isOpen) {
+			throw new Error('Serial port not connected');
+		}
+		return await this.withExclusiveAccess('Sending REMOTCCP.COM raw…', async () => {
+			return await this.streamRemoteCcpFileRaw();
+		});
 	}
 
 	/**
@@ -677,7 +862,7 @@ export class SerialTerminal {
 	 * still throws normally. Must be called from within withExclusiveAccess.
 	 */
 	private async withRemoteCcp<T>(drive: string, work: (client: RemoteCcpClient) => Promise<T>): Promise<T | undefined> {
-		if (this.remoteCcpAvailable === false) {
+		if (this.remoteCcpDisabled || this.remoteCcpAvailable === false) {
 			return undefined;
 		}
 

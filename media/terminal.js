@@ -36,6 +36,12 @@
 
     let initialPort = '';
 
+    function updateRemoteCcpDisableBtn(disabled) {
+      const btn = $('remotccp-disable-btn');
+      btn.textContent = disabled ? 'Enable REMOTCCP' : 'Disable REMOTCCP';
+      btn.classList.toggle('active', disabled);
+    }
+
     // Settings arrive from the extension host rather than being baked into
     // the HTML server-side, so the dropdowns start empty until this runs.
     function applyInitialSettings(settings) {
@@ -329,6 +335,17 @@
 
     $('clear-btn').addEventListener('click', () => clearScreen());
 
+    let remoteCcpDisabled = false;
+    $('remotccp-disable-btn').addEventListener('click', () => {
+      remoteCcpDisabled = !remoteCcpDisabled;
+      updateRemoteCcpDisableBtn(remoteCcpDisabled);
+      vscode.postMessage({ command: 'setRemoteCcpDisabled', value: remoteCcpDisabled });
+    });
+
+    $('remotccp-send-btn').addEventListener('click', () => {
+      vscode.postMessage({ command: 'sendRemoteCcp' });
+    });
+
     let isConnected = false;
     let isBusy = false;
     let connectedPort = '';
@@ -430,6 +447,8 @@
       switch (msg.command) {
         case 'init':
           applyInitialSettings(msg.settings);
+          remoteCcpDisabled = !!msg.remoteCcpDisabled;
+          updateRemoteCcpDisableBtn(remoteCcpDisabled);
           break;
         case 'portList': {
           const sel = $('port');

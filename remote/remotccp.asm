@@ -198,6 +198,8 @@ DSC_LP:	ld	a,(DRVIDX)
 	ld	e,a
 	ld	c,DRV_SET
 	call	BDOS
+	cp  a,255
+	jp	z,DSC_NEXT	;BDOS refused - skip this drive
 	ld	c,DRV_GET
 	call	BDOS
 	ld	b,a
