@@ -378,6 +378,15 @@
       } else if (e.key === 'Backspace') {
         e.preventDefault();
         vscode.postMessage({ command: 'sendData', data: '\b' });
+      } else if (e.ctrlKey && e.shiftKey && !e.metaKey && !e.altKey && e.key.toLowerCase() === 'v') {
+        // Ctrl+Shift+V pastes clipboard text into the terminal - plain
+        // Ctrl+V is deliberately left alone (falls into the Ctrl+letter
+        // branch below) so it reaches CP/M programs that use it themselves
+        // (e.g. WordStar's insert toggle). #output isn't contenteditable,
+        // so there's no native paste target to rely on here - the Async
+        // Clipboard API reads the text directly instead.
+        e.preventDefault();
+        sendPastedText();
       } else if (e.ctrlKey && !e.metaKey && !e.altKey && /^[a-zA-Z]$/.test(e.key)) {
         // Ctrl+letter sends the corresponding ASCII control code (Ctrl+C ->
         // 0x03/ETX, etc.), like a real terminal - except Ctrl+C with an
@@ -395,6 +404,27 @@
         vscode.postMessage({ command: 'sendData', data });
       }
     });
+
+    // Reads the clipboard and sends its text to the device, as if typed.
+    // Used by Ctrl+Shift+V (see keydown handler above).
+    function sendPastedText() {
+      navigator.clipboard.readText().then(text => {
+        if (!text) return;
+        if (userScrolledUp) {
+          const out = $('output');
+          out.scrollTop = out.scrollHeight;
+          userScrolledUp = false;
+        }
+        // Bare CR line endings, matching Enter's own handling above -
+        // CP/M's command-line reader only looks for CR, not LF.
+        const normalized = text.replace(/\r\n|\r|\n/g, '\r');
+        const data = $('force-caps').checked ? normalized.toUpperCase() : normalized;
+        vscode.postMessage({ command: 'sendData', data });
+      }).catch(err => {
+        console.error('[Webview] Clipboard read failed:', err);
+        appendActivity('Paste failed: could not read clipboard');
+      });
+    }
 
     $('output').addEventListener('click', () => { if (isConnected) $('output').focus(); });
 

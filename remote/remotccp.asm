@@ -32,11 +32,16 @@
 ;  fields are sent fixed-width (8 chars, '.', 3 chars, '|') to
 ;  keep the code small; the host trims if it wants to.
 ;
-;- Directory/disk-select "does this drive exist" checks use BDOS
-;  functions 14/25 exactly as the spec names them. Some BDOS
-;  builds print "BDOS ERR ON x: SELECT" and wait for a keypress on
-;  a bad drive number instead of just returning - if that happens
-;  on your BIOS, DL will hang until a key arrives on the console.
+;- Directory/disk-select "does this drive exist" check (DL) calls
+;  the BIOS's SELDSK entry directly for each of A-P, rather than
+;  going through BDOS function 14 (Select Disk) - some BDOS builds
+;  print "BDOS ERR ON x: SELECT" and wait for a keypress on a bad
+;  drive number instead of just returning, which would hang DL
+;  until a key arrived on the console. SELDSK returning HL=0000H
+;  for a nonexistent drive is part of the standard BIOS interface
+;  itself (see the CP/M 2.2 Alteration Guide), so this sidesteps
+;  BDOS's own error handling entirely and works the same way across
+;  virtually every CP/M 2.2 BIOS.
 ;==============================================================
 
 	org 100h
@@ -68,6 +73,11 @@ NAK	equ	15h
 ETX	equ	03h
 EOT	equ	04h
 
+;Offset of the SELDSK entry within the 17-entry BIOS jump table
+;(BOOT, WBOOT, CONST, CONIN, CONOUT, LIST, PUNCH, READER, HOME,
+;SELDSK, ...) - fixed by the standard CP/M 2.2 BIOS layout.
+SELDSK_OFS	equ	27
+
 MAXERR	equ	10	;retries before FG/FP give up on a block
 
 ;==============================================================
@@ -93,6 +103,15 @@ START:	ld	c,DRV_GET
 	call	BDOS
 	ld	a,l
 	call	SNDBYT
+
+;The warm-boot vector at 0001H points at the BIOS jump table's
+;second entry (BOOT is the first, at BIOSBASE+0) - subtracting 3
+;gives the table's start, needed to reach SELDSK directly for DL.
+	ld	hl,(1)
+	ld	de,3
+	or	a
+	sbc	hl,de
+	ld	(BIOSBASE),hl
 
 ;--------------------------------------------------------------
 ;Main command loop - read a CR-terminated line, dispatch on its
@@ -184,10 +203,14 @@ DO_DS:	inc	hl
 	jp	MLOOP
 
 ;--------------------------------------------------------------
-;DL - drive list: try selecting each of A-P, and keep it only if
-;DRV_GET confirms the select actually took effect (the safe,
-;implementation-independent way to tell a real drive from one
-;the BDOS silently refused). Restores the original drive after.
+;DL - drive list: call the BIOS's SELDSK entry directly for each
+;of A-P and keep only the ones where it returns a non-zero DPH
+;address (HL=0000H means the drive doesn't exist) - see the header
+;comment for why this goes straight to the BIOS instead of through
+;BDOS function 14. BDOS's own notion of the current drive is never
+;touched by these probes, but ORIGDRV/restoring it afterward is
+;kept anyway as a safety net for BIOSes that mirror SELDSK's result
+;back into BDOS state.
 ;--------------------------------------------------------------
 DO_DL:	ld	c,DRV_GET
 	call	BDOS
@@ -195,17 +218,16 @@ DO_DL:	ld	c,DRV_GET
 	xor	a
 	ld	(DRVIDX),a
 DSC_LP:	ld	a,(DRVIDX)
-	ld	e,a
-	ld	c,DRV_SET
-	call	BDOS
-	cp  a,255
-	jp	z,DSC_NEXT	;BDOS refused - skip this drive
-	ld	c,DRV_GET
-	call	BDOS
-	ld	b,a
+	ld	c,a		;C = drive number for SELDSK
+	ld	hl,(BIOSBASE)
+	ld	de,SELDSK_OFS
+	add	hl,de		;HL -> SELDSK's jump-table entry
+	ld	de,0		;E=0: tell the BIOS to re-verify the media
+	call	CALLHL		;-> HL = DPH address, or 0000H if no such drive
+	ld	a,h
+	or	l
+	jp	z,DSC_NEXT
 	ld	a,(DRVIDX)
-	cp	b
-	jp	nz,DSC_NEXT
 	add	a,'A'
 	call	SNDBYT
 DSC_NEXT:	ld	a,(DRVIDX)
@@ -244,15 +266,27 @@ FL_DONE:	ld	a,EOT
 	call	SNDBYT
 	jp	MLOOP
 
-;fills XFCB with a "match everything" wildcard pattern
+;fills XFCB with a "match everything" wildcard pattern: '*' as the first
+;character of the name and extension fields, '?' filling the rest of each -
+;mirrors exactly how the CCP's own command-line parser expands a typed
+;"*.*" into an FCB, rather than an FCB of all '?' in every position, which
+;hasn't matched reliably on real hardware.
 FL_WILD:	xor	a
 	ld	(XFCB),a
 	ld	hl,XFCB+1
-	ld	b,11
-	ld	a,'?'
-FLW_LP:	ld	(hl),a
+	ld	(hl),'*'
 	inc	hl
-	djnz	FLW_LP
+	ld	b,7
+	ld	a,'?'
+FLW_NM:	ld	(hl),a
+	inc	hl
+	djnz	FLW_NM
+	ld	(hl),'*'
+	inc	hl
+	ld	b,2
+FLW_EX:	ld	(hl),a
+	inc	hl
+	djnz	FLW_EX
 	xor	a
 	ld	(XFCB+12),a
 	ret
@@ -473,6 +507,12 @@ SUMD_LP:	add	a,(hl)
 	djnz	SUMD_LP
 	ret
 
+;Z80 has no "CALL (HL)" opcode - CALL here pushes the return address,
+;then JP (HL) transfers control to HL without touching the stack, so
+;the callee's own RET lands back right after the "call CALLHL".
+;Used by DO_DL to call the BIOS's SELDSK entry via a computed address.
+CALLHL:	jp	(hl)
+
 ;sends A as two uppercase hex chars
 SNDHEX:	push	af
 	rrca
@@ -636,6 +676,7 @@ ORIGDRV:	ds	1
 CHKSUM:	ds	1
 ERRCNT:	ds	1
 FCBSAV:	ds	2
+BIOSBASE:	ds	2
 
 CMDBUF:	ds	40
 XFCB:	ds	36

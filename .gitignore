@@ -12,6 +12,7 @@ build/
 
 remote/*
 !remote/remotccp.asm
+!remote/remotccp.hex
 !remote/xmodem.asm
 
 examples/

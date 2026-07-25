@@ -254,25 +254,6 @@ export class SerialTerminal {
 	}
 
 	/**
-	 * Writes `data` in small chunks with a short pause between each, instead
-	 * of one `writeRaw()` blast. On at least one piece of real hardware, the
-	 * console's echo path lags noticeably behind actual reception - a full
-	 * file blasted in one write gets received fine, but its echo keeps
-	 * trickling out for seconds afterward, right through whatever prompt or
-	 * command is sent next (corrupting it). Pacing the send keeps the
-	 * device's echo caught up in something close to real time so there's no
-	 * backlog left to collide with what comes after - used for PIP transfers
-	 * (raw binary and Intel HEX) rather than XMODEM/Remote CCP's own
-	 * block-at-a-time protocols, which already pace themselves via ACKs.
-	 */
-	private async writeRawPaced(data: Buffer, chunkBytes = 64, delayMs = 30): Promise<void> {
-		for (let offset = 0; offset < data.length; offset += chunkBytes) {
-			this.writeRaw(data.subarray(offset, offset + chunkBytes));
-			await new Promise(resolve => setTimeout(resolve, delayMs));
-		}
-	}
-
-	/**
 	 * Runs `work` with sole ownership of the serial line, blocking interactive
 	 * input for its duration so a background probe (drive scan, DIR listing,
 	 * file transfer) can't interleave with - and corrupt - what the user is
@@ -605,11 +586,22 @@ export class SerialTerminal {
 
 	/**
 	 * Installs REMOTCCP.COM onto A: for the first time, after asking the
-	 * user. Uses PIP reading from RDR: (the device's own console/serial
-	 * port, per XMODEM.CFG's /X0-style port mapping) in object/binary mode
-	 * ("[O]") rather than XMODEM - REMOTCCP.COM doesn't exist on the device
-	 * yet, so bootstrapping it can't depend on it (or on XMODEM.COM, which a
-	 * fresh device might not have either) being present.
+	 * user. Tries three methods in order, each falling back to the next on
+	 * failure or missing prerequisites:
+	 *
+	 * 1. ED (installRemoteCcpViaEd) - inserting text through ED.COM's line
+	 *    editor is driven entirely through the console, the same path
+	 *    DIR/STAT/LOAD/etc. already use reliably throughout this file, so it
+	 *    never touches RDR: (the reader device) at all. Tried first since it
+	 *    sidesteps RDR:'s hardware-specific quirks rather than working
+	 *    around any one of them.
+	 * 2. Intel HEX via PIP (installRemoteCcpViaHex) - text-mode PIP,
+	 *    checksummed per line, one record at a time. Still goes through
+	 *    RDR:, but text mode has proven more reliable than raw binary.
+	 * 3. Raw binary via PIP's object mode ("[O]") - the original approach;
+	 *    has proven the least reliable of the three on real hardware, kept
+	 *    only as a last resort for devices without ED.COM or LOAD.COM/
+	 *    PIP.COM available for the other two.
 	 */
 	private async bootstrapRemoteCcp(): Promise<boolean> {
 		const comPath = this.context.asAbsolutePath(path.join('remote', 'remotccp.com'));
@@ -620,7 +612,7 @@ export class SerialTerminal {
 
 		const choice = await vscode.window.showInformationMessage(
 			`${REMOTE_CCP_FILENAME} isn't on A: yet. It replaces the slower CCP-command-driven drive scans, ` +
-			`file listings, and transfers with a small resident helper. Install it now via PIP over the serial link?`,
+			`file listings, and transfers with a small resident helper. Install it now over the serial link?`,
 			{ modal: true },
 			'Install'
 		);
@@ -628,15 +620,28 @@ export class SerialTerminal {
 			return false;
 		}
 
+		// ED never touches RDR: - inserting text is driven entirely through
+		// the console, the same path DIR/STAT/LOAD/etc. already use
+		// reliably throughout this file - so it sidesteps the hardware-
+		// specific RDR: quirks (echoed transfers replaying as fake
+		// keystrokes, PIP outright aborting) the other two methods below
+		// have both hit, rather than working around any one of them.
+		if (await this.canInstallRemoteCcpViaEd()) {
+			if (await this.installRemoteCcpViaEd()) {
+				return true;
+			}
+			this._onActivity.fire('ED install failed - trying Intel HEX via PIP…');
+		}
+
 		// Raw binary through PIP's [O] mode has proven unreliable on real
 		// hardware - prefer text-mode PIP + LOAD (Intel HEX, checksummed
-		// per line) whenever both are available, and only fall back to the
-		// raw path if they're missing or the hex install itself fails.
+		// per line) whenever both are available, and only fall back further
+		// if they're missing or the hex install itself fails.
 		if (await this.canInstallRemoteCcpViaHex()) {
 			if (await this.installRemoteCcpViaHex()) {
 				return true;
 			}
-			this._onActivity.fire('Intel HEX install failed - falling back to raw binary PIP transfer…');
+			this._onActivity.fire('Intel HEX install via PIP failed - falling back to raw binary PIP transfer…');
 		}
 
 		await this.sendRemoteCcpPipReceiveCommand();
@@ -668,51 +673,231 @@ export class SerialTerminal {
 		}
 
 		const hexFileName = 'REMOTCCP.HEX';
-		const hexText = toIntelHex(fileContent);
+		const hexLines = toIntelHex(fileContent).split('\r\n').filter(Boolean);
 
-		this._onActivity.fire(`Sending ${hexFileName} (${fileContent.length} bytes as Intel HEX) via PIP…`);
 		await this.selectDrive('A');
-		this.writeRaw(`PIP A:${hexFileName}=RDR:\r`);
-		// Give the CCP a moment to load and launch PIP before streaming.
-		await new Promise(resolve => setTimeout(resolve, 300));
 
-		const start = this.inputBuffer.length;
-		await this.writeRawPaced(Buffer.from(hexText, 'ascii'));
-		// Trailing sentinel: standard CP/M text-file EOF marker for PIP
-		// reading from RDR:.
-		this.writeRaw(Buffer.from([0x1a]));
+		// One whole-file PIP transfer reliably ends with this hardware
+		// replaying the entire thing back as fake keystrokes once PIP hands
+		// control back to the CCP (garbled "?" unknown-command errors) -
+		// seemingly some shared type-ahead buffer the BIOS's raw byte-input
+		// routine feeds regardless of whether PIP or the CCP is the logical
+		// reader. Sending one Intel HEX record (a single short line) per PIP
+		// invocation keeps each RDR: session tiny: record 0 creates
+		// hexFileName fresh, every record after that appends to it with
+		// PIP's [A] parameter - no multi-source concatenation (tried first,
+		// but this PIP silently produced an empty file instead of erroring,
+		// so the presence-only check kept passing while every record was
+		// quietly discarded - not caught until the very end).
+		let bytesSoFar = 0;
+		for (let i = 0; i < hexLines.length; i++) {
+			const line = hexLines[i] + '\r\n';
+			this._onActivity.fire(`Sending Intel HEX record ${i + 1}/${hexLines.length}${i > 0 ? ' (append)' : ''}…`);
+			if (!await this.pipReceiveLine('A', hexFileName, line, i > 0)) {
+				this._onActivity.fire(`Record ${i + 1}/${hexLines.length} transfer could not be verified - leaving ${hexFileName} in place for inspection`);
+				return false;
+			}
 
-		const sent = await this.waitForPrompt(start, 30000);
-		// The prompt showing up doesn't mean the echo backlog has actually
-		// drained (see writeRawPaced) - wait for it to go genuinely quiet
-		// before trusting the transfer is done, or the very next command
-		// (the DIR below) collides with its tail instead of getting a clean
-		// response.
-		await this.waitForIdle(1000, 10000);
-		if (!sent || !await this.hasFileOnDrive('A', hexFileName)) {
-			this._onActivity.fire(`${hexFileName} transfer could not be verified`);
+			bytesSoFar += line.length;
+			// Verify at record 1 (confirms plain create works) and again at
+			// record 3 (confirms [A] append is actually accumulating, not
+			// silently overwriting) - three ~45-byte records is enough to
+			// cross the 128-byte record boundary, so a broken append (each
+			// call landing 1 record regardless) reads differently from a
+			// working one (2 records by then). Checking only at record 1
+			// wouldn't catch that: one or two small records both still fit
+			// in a single 128-byte record, so a no-op append would look
+			// identical to a working one until enough data piles up. Not
+			// checked on every record - fast, just enough to fail within a
+			// few seconds instead of after sending everything (as happened
+			// with multi-source concatenation). The full transfer still
+			// gets one thorough check below.
+			if (i === 0 || i === 2) {
+				const expectedSoFar = Math.ceil(bytesSoFar / 128);
+				if (!await this.waitForExpectedFileSize('A', hexFileName, expectedSoFar, 3, 400)) {
+					this._onActivity.fire(
+						`${hexFileName} didn't grow as expected after record ${i + 1} - ` +
+						`PIP's [A] append may not be supported on this device - leaving it in place for inspection`
+					);
+					return false;
+				}
+			}
+		}
+
+		// A DIR match right after the transfer's prompt reappears isn't solid
+		// proof the file is genuinely done landing on disk (see LOAD's error
+		// below, which this hardware has been seen to hit despite exactly
+		// that check passing moments earlier) - confirm its actual size
+		// against what was sent before trusting it enough to hand to LOAD.
+		const expectedRecords = Math.ceil(bytesSoFar / 128);
+		if (!await this.waitForExpectedFileSize('A', hexFileName, expectedRecords)) {
+			this._onActivity.fire(`${hexFileName} transfer could not be verified - leaving it in place for inspection`);
 			return false;
 		}
 
+		return await this.runLoadForRemoteCcp(hexFileName, 'via Intel HEX');
+	}
+
+	/**
+	 * Runs `LOAD REMOTCCP` to convert an already-verified REMOTCCP.HEX into
+	 * REMOTCCP.COM. Checks LOAD's own response for an error rather than
+	 * trusting a bare "DIR shows the name" check afterward - on at least one
+	 * BIOS, LOAD creates/truncates its output .COM before it even tries to
+	 * open the source .HEX, so a failed conversion still leaves an empty
+	 * REMOTCCP.COM behind that a presence-only check can't tell apart from a
+	 * real install (this is exactly what produced garbled Remote CCP output
+	 * and LOAD's own error resurfacing when REMOTCCP was run by hand
+	 * afterward - CCP jumping into a near-empty .COM ends up executing
+	 * whatever LOAD.COM itself left behind in memory). Not erasing
+	 * REMOTCCP.HEX here, even on success - temporary, so a device that
+	 * misbehaves can still be inspected by hand afterward; re-add cleanup
+	 * once this hardware's RDR: quirks are actually sorted out. Must be
+	 * called from within withExclusiveAccess.
+	 */
+	private async runLoadForRemoteCcp(hexFileName: string, via: string): Promise<boolean> {
 		this._onActivity.fire(`Converting ${hexFileName} to ${REMOTE_CCP_FILENAME} with LOAD…`);
 		const loadStart = this.inputBuffer.length;
 		this.writeRaw('LOAD REMOTCCP\r');
 		await this.waitForPrompt(loadStart, 15000);
 		await this.waitForIdle(500, 5000);
 
-		const installed = await this.hasFileOnDrive('A', REMOTE_CCP_FILENAME);
-		this._onActivity.fire(installed
-			? `${REMOTE_CCP_FILENAME} installed on A: via Intel HEX`
-			: `LOAD did not produce ${REMOTE_CCP_FILENAME}`);
-
-		if (installed) {
-			// Best-effort cleanup of the intermediate .HEX file - failure here
-			// doesn't affect whether the install itself succeeded.
-			this.writeRaw(`ERA A:${hexFileName}\r`);
-			await this.waitForIdle(300, 3000);
+		const loadResponse = this.inputBuffer.slice(loadStart);
+		if (/error/i.test(loadResponse)) {
+			this._onActivity.fire(`LOAD reported an error converting ${hexFileName}: ${loadResponse.trim()} - leaving it in place for inspection`);
+			return false;
 		}
 
+		const installed = await this.hasFileOnDrive('A', REMOTE_CCP_FILENAME);
+		this._onActivity.fire(installed
+			? `${REMOTE_CCP_FILENAME} installed on A: ${via}`
+			: `LOAD did not produce ${REMOTE_CCP_FILENAME}`);
 		return installed;
+	}
+
+	/**
+	 * Receives `line` into `fileName` on `drive` via a single short PIP/RDR:
+	 * session - a fresh file (`append` false, PIP's F_DELETE+F_MAKE) or
+	 * appended onto an existing one (`append` true, PIP's `[A]` parameter).
+	 * Used one Intel HEX record at a time by installRemoteCcpViaHex rather
+	 * than one PIP call for the whole file - see that method's comment for
+	 * why. Must be called from within withExclusiveAccess.
+	 */
+	private async pipReceiveLine(drive: string, fileName: string, line: string, append: boolean): Promise<boolean> {
+		this.writeRaw(`PIP ${drive}:${fileName}=RDR:${append ? '[A]' : ''}\r`);
+		// Give the CCP a moment to load and launch PIP before streaming.
+		await new Promise(resolve => setTimeout(resolve, 300));
+
+		const start = this.inputBuffer.length;
+		this.writeRaw(line);
+		this.writeRaw(Buffer.from([0x1a]));
+
+		const sent = await this.waitForPrompt(start, 10000);
+		// Even a single small record has shown some trailing echo/replay on
+		// this hardware - settle before trusting it's actually done, just
+		// with a far smaller budget than the whole-file transfer needed
+		// (see installRemoteCcpViaHex), since there's far less to replay.
+		await this.waitForIdle(500, 8000);
+		return sent && await this.hasFileOnDrive(drive, fileName);
+	}
+
+	/** ED.COM must already be on A: for the ED-based install path. */
+	private async canInstallRemoteCcpViaEd(): Promise<boolean> {
+		return await this.hasFileOnDrive('A', 'ED.COM');
+	}
+
+	/**
+	 * Installs REMOTCCP.COM onto A: by typing the Intel HEX text straight
+	 * into ED.COM's line editor and saving, instead of transferring it via
+	 * PIP. Requires canInstallRemoteCcpViaEd() to have already confirmed
+	 * ED.COM is present. Must be called from within withExclusiveAccess.
+	 *
+	 * ED never touches RDR: - inserting text goes through the console, the
+	 * same path DIR/STAT/LOAD/etc. use reliably throughout this file - so
+	 * this sidesteps the whole class of RDR:-specific problems the PIP-based
+	 * paths have hit, rather than working around any one of them. Untested
+	 * against real hardware; ED's command syntax below follows the standard
+	 * DR CP/M 2.2 ED specification (`I` to insert, a line starting with
+	 * Ctrl-Z to end insert mode, `E` to save and exit) - a third-party ED
+	 * clone could differ.
+	 */
+	private async installRemoteCcpViaEd(): Promise<boolean> {
+		const comPath = this.context.asAbsolutePath(path.join('remote', 'remotccp.com'));
+		let fileContent: Buffer;
+		try {
+			fileContent = fs.readFileSync(comPath);
+		} catch (error) {
+			this._onActivity.fire(`Remote CCP install failed: couldn't read bundled ${REMOTE_CCP_FILENAME}`);
+			return false;
+		}
+
+		const hexFileName = 'REMOTCCP.HEX';
+		const hexLines = toIntelHex(fileContent).split('\r\n').filter(Boolean);
+
+		await this.selectDrive('A');
+
+		// Clear any stale REMOTCCP.HEX left by an earlier failed attempt
+		// first, so ED opens it as a genuinely NEW FILE rather than editing
+		// whatever's already there - unlike leaving a failed attempt's own
+		// files in place for inspection, this is just making sure a new
+		// attempt starts from a clean slate.
+		this.writeRaw(`ERA A:${hexFileName}\r`);
+		await this.waitForIdle(300, 3000);
+
+		this._onActivity.fire(`Starting ED to insert ${hexFileName}…`);
+		const edStart = this.inputBuffer.length;
+		this.writeRaw(`ED A:${hexFileName}\r`);
+		// ED doesn't print the CCP's "X>" drive prompt while it's running,
+		// so there's no pattern to wait for here - settle instead. Loading
+		// ED.COM itself is real disk I/O, which this hardware has shown can
+		// take a good while (see selectDrive's own comment on the same
+		// point), hence the generous cap.
+		await this.waitForIdle(500, 8000);
+
+		this._onActivity.fire(`Inserting ${hexLines.length} Intel HEX records…`);
+		this.writeRaw('I\r');
+		await this.waitForIdle(300, 3000);
+
+		this.writeRaw(hexLines.map(line => line + '\r').join(''));
+		// A line starting with Ctrl-Z ends ED's insert mode.
+		this.writeRaw(Buffer.from([0x1a]));
+		// Still inside ED (Ctrl-Z returns to its own "*" command mode, not
+		// the CCP) so there's no prompt to wait for yet either - this has
+		// been observed taking several seconds just to finish echoing back
+		// what was inserted, well before whatever real work ED itself still
+		// has left to do with it, hence the large cap.
+		await this.waitForIdle(1500, 45000);
+
+		this._onActivity.fire(`Saving ${hexFileName} and exiting ED…`);
+		const saveStart = this.inputBuffer.length;
+		this.writeRaw('E\r');
+		// Unlike the steps above, E ends the ED session and returns control
+		// to the CCP - which does print its "X>" prompt, so this is the one
+		// place in this whole method a real prompt-wait applies. Writing
+		// the file out is real disk I/O (rewriting the whole thing, not an
+		// incremental append), and every other disk-I/O step on this
+		// hardware has needed a generous budget to avoid moving on to LOAD
+		// before the save has actually finished - so this one gets the
+		// largest budget in the method.
+		await this.waitForPrompt(saveStart, 60000);
+		await this.waitForIdle(500, 10000);
+
+		const edResponse = this.inputBuffer.slice(edStart);
+		if (/error/i.test(edResponse)) {
+			this._onActivity.fire(`ED reported an error: ${edResponse.trim()} - leaving ${hexFileName} in place for inspection`);
+			return false;
+		}
+
+		// No pre-LOAD size check here (unlike the PIP-based hex path) - a
+		// manual test confirmed ED's save is trustworthy once E's own
+		// prompt has returned (TYPE showed the file byte-for-byte correct),
+		// while the STAT-based size check was the one thing that produced a
+		// false failure on that same run: it never even got to LOAD despite
+		// the file already being fine, almost certainly the same echo-lag
+		// timing fragility seen everywhere else on this hardware, just
+		// tripping up the verification instead of the transfer this time.
+		// LOAD's own response is a clean enough success/failure signal on
+		// its own (see runLoadForRemoteCcp).
+		return await this.runLoadForRemoteCcp(hexFileName, 'via ED');
 	}
 
 	/**
@@ -747,18 +932,20 @@ export class SerialTerminal {
 
 		this._onActivity.fire(`Sending ${REMOTE_CCP_FILENAME} (${fileContent.length} bytes) raw…`);
 		const start = this.inputBuffer.length;
-		await this.writeRawPaced(fileContent);
+		// One unbroken write, not chunked - see installRemoteCcpViaHex's
+		// matching comment.
+		this.writeRaw(fileContent);
 		// Trailing sentinel: harmless whether or not [O] mode needs it, and
 		// the only signal available if it turns out RDR: has no EOF of its
 		// own for PIP to detect completion from.
 		this.writeRaw(Buffer.from([0x1a]));
 
 		const finished = await this.waitForPrompt(start, 30000);
-		// The prompt showing up doesn't mean the echo backlog has actually
-		// drained (see writeRawPaced) - wait for it to go genuinely quiet
-		// before trusting the transfer is done, or the verification DIR
-		// below collides with its tail instead of getting a clean response.
-		await this.waitForIdle(1000, 10000);
+		// See installRemoteCcpViaHex's matching comment: the prompt
+		// reappearing doesn't mean the line is free yet - this hardware
+		// replays the whole transfer back as fake keystrokes afterward, and
+		// that can run well past 10s, so this budget needs real margin.
+		await this.waitForIdle(1500, 45000);
 		if (!finished) {
 			this._onActivity.fire('Remote CCP send timed out waiting for PIP to finish');
 			return false;
@@ -769,6 +956,51 @@ export class SerialTerminal {
 			? `${REMOTE_CCP_FILENAME} installed on A:`
 			: `${REMOTE_CCP_FILENAME} install could not be verified`);
 		return installed;
+	}
+
+	/**
+	 * Confirms `fileName` on `drive` has actually reached `expectedRecords`
+	 * 128-byte records, retrying for a few seconds rather than trusting a
+	 * single check right after the transfer's prompt reappears (see the
+	 * caller for why that alone isn't solid proof on this hardware).
+	 *
+	 * Uses STAT.COM's exact "Recs" column when it's present - the CP/M 2.2
+	 * standard STAT report format ("Recs  Bytes  Ext Acc" with Recs as the
+	 * leftmost, exact-count field) is stable enough across DR-derived
+	 * implementations to parse safely. Without STAT.COM, falls back to
+	 * requiring the plain DIR-based presence check (hasFileOnDrive) to
+	 * succeed twice in a row - not an exact size, but still meaningfully
+	 * more than a single point-in-time check.
+	 */
+	private async waitForExpectedFileSize(
+		drive: string, fileName: string, expectedRecords: number, attempts = 6, delayMs = 500
+	): Promise<boolean> {
+		const haveStat = await this.hasFileOnDrive(drive, 'STAT.COM');
+		let lastSeen = false;
+
+		for (let i = 0; i < attempts; i++) {
+			if (haveStat) {
+				await this.selectDrive(drive);
+				const start = this.inputBuffer.length;
+				this.writeRaw(`STAT ${drive}:${fileName}\r`);
+				await this.waitForPrompt(start, 8000);
+				await this.waitForIdle(300, 3000);
+				const response = this.inputBuffer.slice(start);
+				const line = response.split(/\r?\n/).find(l => new RegExp(fileName.replace('.', '\\.'), 'i').test(l));
+				const recs = line?.match(/(\d+)/)?.[1];
+				if (recs !== undefined && parseInt(recs, 10) === expectedRecords) {
+					return true;
+				}
+			} else {
+				const seen = await this.hasFileOnDrive(drive, fileName);
+				if (seen && lastSeen) {
+					return true;
+				}
+				lastSeen = seen;
+			}
+			await new Promise(resolve => setTimeout(resolve, delayMs));
+		}
+		return false;
 	}
 
 	/**
