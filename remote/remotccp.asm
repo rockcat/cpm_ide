@@ -271,24 +271,19 @@ FL_DONE:	ld	a,EOT
 ;mirrors exactly how the CCP's own command-line parser expands a typed
 ;"*.*" into an FCB, rather than an FCB of all '?' in every position, which
 ;hasn't matched reliably on real hardware.
-FL_WILD:	xor	a
-	ld	(XFCB),a
-	ld	hl,XFCB+1
-	ld	(hl),'*'
-	inc	hl
-	ld	b,7
-	ld	a,'?'
-FLW_NM:	ld	(hl),a
+FL_WILD:
+	ld 	hl,XFCB
+	ld  (hl),0
+	inc hl				; -> name field
+	ld  b,11			; ???????.???		- we don't need to provide the dot
+	FLW_NM:	ld	(hl),'?'
 	inc	hl
 	djnz	FLW_NM
-	ld	(hl),'*'
+	ld  b, 24			; remaining FCB length, clear it
+FLW_LP:
+	ld	(hl),0
 	inc	hl
-	ld	b,2
-FLW_EX:	ld	(hl),a
-	inc	hl
-	djnz	FLW_EX
-	xor	a
-	ld	(XFCB+12),a
+	djnz	FLW_LP
 	ret
 
 ;A = directory slot (0-3) returned by F_SFIRST/F_SNEXT; prints
