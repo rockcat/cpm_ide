@@ -207,10 +207,17 @@ DO_DS:	inc	hl
 ;of A-P and keep only the ones where it returns a non-zero DPH
 ;address (HL=0000H means the drive doesn't exist) - see the header
 ;comment for why this goes straight to the BIOS instead of through
-;BDOS function 14. BDOS's own notion of the current drive is never
-;touched by these probes, but ORIGDRV/restoring it afterward is
-;kept anyway as a safety net for BIOSes that mirror SELDSK's result
-;back into BDOS state.
+;BDOS function 14.
+;
+;Probing the drives that DON'T exist (B-P on a single-drive
+;system) has been observed leaving BDOS's own directory-search
+;state confused afterward - F_SFIRST/F_SNEXT (used by FL) started
+;returning "no files" on a drive verified moments later, via DIR,
+;to have plenty. Restoring the original drive via BDOS 14 alone
+;(DRV_SET) wasn't enough to repair this; re-asserting it via
+;SELDSK itself first, immediately before the DRV_SET restore, was
+;- fltest.asm's DL+DS+FL reproduction confirmed both halves are
+;needed on real hardware that hit this.
 ;--------------------------------------------------------------
 DO_DL:	ld	c,DRV_GET
 	call	BDOS
@@ -235,6 +242,17 @@ DSC_NEXT:	ld	a,(DRVIDX)
 	ld	(DRVIDX),a
 	cp	16
 	jp	c,DSC_LP
+
+	;Re-assert the original drive via SELDSK itself before the
+	;BDOS 14 restore below - see the comment above DO_DL.
+	ld	a,(ORIGDRV)
+	ld	c,a
+	ld	hl,(BIOSBASE)
+	ld	de,SELDSK_OFS
+	add	hl,de
+	ld	de,0
+	call	CALLHL
+
 	ld	a,(ORIGDRV)
 	ld	e,a
 	ld	c,DRV_SET
@@ -266,17 +284,20 @@ FL_DONE:	ld	a,EOT
 	call	SNDBYT
 	jp	MLOOP
 
-;fills XFCB with a "match everything" wildcard pattern: '*' as the first
-;character of the name and extension fields, '?' filling the rest of each -
-;mirrors exactly how the CCP's own command-line parser expands a typed
-;"*.*" into an FCB, rather than an FCB of all '?' in every position, which
-;hasn't matched reliably on real hardware.
+;fills XFCB with a "match everything" wildcard pattern: '?' in every name
+;and extension byte. An earlier version used '*' as the first character of
+;each field (mirroring how the CCP's own command-line parser expands a
+;typed "*.*" into an FCB) - fltest.asm proved that wrong on real hardware:
+;F_SFIRST returned FFh (no matches at all) with '*' present, since this
+;BDOS treats it as a literal byte to match rather than a wildcard, while
+;plain '?' - the standard, BDOS-level wildcard character - found every
+;file correctly.
 FL_WILD:
 	ld 	hl,XFCB
 	ld  (hl),0
 	inc hl				; -> name field
 	ld  b,11			; ???????.???		- we don't need to provide the dot
-	FLW_NM:	ld	(hl),'?'
+FLW_NM:	ld	(hl),'?'
 	inc	hl
 	djnz	FLW_NM
 	ld  b, 24			; remaining FCB length, clear it

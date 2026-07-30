@@ -411,6 +411,9 @@
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
+    "assemble": "npm run assemble-remote && npm run assemble-xmodem",
+    "assemble-remote": "cd remote && zasm remotccp.asm -o remotccp.com && zasm --target=ram -x remotccp.asm",
+    "assemble-xmodem": "cd remote && zasm --asm8080 xmodem.asm -o xmodem.com && zasm --asm8080 --target=ram -x xmodem.asm",
     "watch": "tsc -watch -p ./",
     "pretest": "npm run compile && npm run lint",
     "lint": "eslint src --ext ts",

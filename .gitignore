@@ -14,6 +14,8 @@ remote/*
 !remote/remotccp.asm
 !remote/remotccp.hex
 !remote/xmodem.asm
+!remote/drivetest.asm
+!remote/fltest.asm
 
 examples/
 

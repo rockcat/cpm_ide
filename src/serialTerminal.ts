@@ -962,8 +962,15 @@ export class SerialTerminal {
 		// the CCP) so there's no prompt to wait for yet either - this has
 		// been observed taking several seconds just to finish echoing back
 		// what was inserted, well before whatever real work ED itself still
-		// has left to do with it, hence the large cap.
-		await this.waitForIdle(1500, 45000);
+		// has left to do with it, hence the large cap. The gap BETWEEN
+		// individual echoed lines has also been observed exceeding 1.5s
+		// even mid-transfer (not just at the very end) - too short an idle
+		// threshold here declares "done" after 3-4 of ~70 lines, sending E
+		// while ED is still in insert mode, where it lands as bogus
+		// inserted text instead of the exit command and everything after
+		// hangs waiting for a prompt that's never coming. 5s comfortably
+		// clears the observed gap.
+		await this.waitForIdle(5000, 60000);
 
 		this._onActivity.fire(`Saving ${hexFileName} and exiting ED…`);
 		const saveStart = this.inputBuffer.length;
@@ -976,8 +983,20 @@ export class SerialTerminal {
 		// hardware has needed a generous budget to avoid moving on to LOAD
 		// before the save has actually finished - so this one gets the
 		// largest budget in the method.
-		await this.waitForPrompt(saveStart, 60000);
+		const saved = await this.waitForPrompt(saveStart, 60000);
 		await this.waitForIdle(500, 10000);
+		if (!saved) {
+			// E never actually returned to the CCP - most likely it landed as
+			// bogus inserted text instead of the exit command (e.g. sent
+			// while ED was still mid-insert-echo), leaving ED still running.
+			// Failing here immediately matters: falling through anyway would
+			// still attempt LOAD next, which would also hang and eventually
+			// time out on its own - needlessly doubling the time before this
+			// method reports failure and the caller can fall back to the
+			// next install method.
+			this._onActivity.fire(`ED never returned to the CCP after E - leaving ${hexFileName} in place for inspection`);
+			return false;
+		}
 
 		const edResponse = this.inputBuffer.slice(edStart);
 		if (/error/i.test(edResponse)) {

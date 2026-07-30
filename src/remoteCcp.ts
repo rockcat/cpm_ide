@@ -138,8 +138,21 @@ export class RemoteCcpClient {
 			// permanently desyncing every checksum after it - this needs
 			// real margin above the worst gap seen so far, not just enough
 			// to cover it exactly.
-			const settleMs = Math.min(8000, Math.max(0, deadline - Date.now()));
-			if (await this.waitQuiet(settleMs)) {
+			//
+			// Always the full 8s, never shrunk to whatever time happens to
+			// be left before the deadline: a shrinking window can be fooled
+			// by a steady-but-not-actually-quiet stream (e.g. a crashed or
+			// corrupted REMOTCCP.COM emitting garbage every second or two,
+			// comfortably under a full settle window but longer than an
+			// almost-exhausted one) into looking "quiet" just because the
+			// window checked was too short to catch the next byte - exactly
+			// how a misbehaving device on real hardware once got mistaken
+			// for a genuinely idle one. Overshooting timeoutMs by up to one
+			// full settle window is a fine trade for not doing that again;
+			// the outer loop's own deadline check still catches a
+			// genuinely-idle-forever case (the settle call always resolves
+			// eventually) as a hard timeout, just not exactly at timeoutMs.
+			if (await this.waitQuiet(8000)) {
 				return byte;
 			}
 		}
