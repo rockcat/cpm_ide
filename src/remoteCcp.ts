@@ -1,4 +1,5 @@
 import { SerialLink } from './xmodem';
+import { TransferCancelledError } from './transferQueue';
 
 const ACK = 0x06;
 const NAK = 0x15;
@@ -84,84 +85,67 @@ export class RemoteCcpClient {
 	}
 
 	/**
-	 * Resolves `true` if no byte arrives within `ms` - `false` as soon as one
-	 * does, pushing it back to the front of pendingRx unconsumed (so it's
-	 * exactly as if this check never happened).
-	 */
-	private waitQuiet(ms: number): Promise<boolean> {
-		return new Promise((resolve) => {
-			const probe = (byte: number) => {
-				clearTimeout(timer);
-				this.pendingRx.unshift(byte);
-				resolve(false);
-			};
-			const timer = setTimeout(() => {
-				const idx = this.waiters.indexOf(probe);
-				if (idx >= 0) {
-					this.waiters.splice(idx, 1);
-				}
-				resolve(true);
-			}, ms);
-			this.waiters.push(probe);
-		});
-	}
-
-	/**
-	 * Waits for REMOTCCP.COM to actually be up and idle in its command loop.
-	 * A freshly-launched session's startup chatter isn't just "the version
-	 * byte": the CCP's own trailing CR/LF (printed before it's even
-	 * finished loading the .COM off disk) can straggle in a good while
-	 * after the echoed launch command, followed eventually - sometimes
-	 * seconds later on slower disk I/O - by the real version byte. Grabbing
-	 * whichever byte arrives first and assuming it's the version byte
-	 * leaves the real one unconsumed, desyncing every read after it by one
-	 * byte. Discarding bytes until the line has been genuinely quiet for a
-	 * stretch sidesteps needing to identify which byte was "the" version
-	 * byte at all - once quiet, the command loop is just waiting for us.
+	 * Waits for REMOTCCP.COM to actually be up and reads its startup version
+	 * byte. `preambleLength` is the exact byte count of everything that
+	 * precedes it - the console's character-echo of the launch command
+	 * itself (including its terminating CR) plus the CCP's own trailing
+	 * CR/LF, printed just before the .COM actually starts running (see
+	 * launchRemoteCcp()'s comment for why both are entirely predictable).
+	 * Since the exact count is known, this simply reads that many bytes and
+	 * discards them, then reads and returns the next one - no need to guess
+	 * when a "quiet" gap means the version byte has arrived, or to wait any
+	 * further once it's actually in hand.
+	 *
+	 * Each byte gets the full `timeoutMs` budget individually (not shared
+	 * across all of them) - loading the .COM off disk before the CCP's
+	 * trailing CR/LF, or before the version byte itself, can each take
+	 * several seconds on slower hardware, and a shared/shrinking budget
+	 * risks timing out mid-gap on whichever byte happens to be slowest.
 	 *
 	 * Returns the version byte (BDOS function 12's L register, e.g. 0x22
-	 * for CP/M 2.2) - by construction, whichever byte was read in the loop
-	 * iteration right before quiet was confirmed is the real one, since
-	 * everything read in earlier iterations turned out to have more data
-	 * following it (i.e. was still just startup chatter).
+	 * for CP/M 2.2).
 	 */
-	async waitForStartup(timeoutMs = 40000): Promise<number> {
-		const deadline = Date.now() + timeoutMs;
-		while (Date.now() < deadline) {
-			const byte = await this.readByte(deadline - Date.now());
-			// Observed on real hardware: a stray leftover byte can be
-			// followed by a further gap - over 3.7s at least once - before
-			// the genuine version byte arrives (loading the .COM off disk).
-			// A too-short settle window declaring "done" mid-gap is exactly
-			// how a later read (e.g. getFile's first block) ends up
-			// consuming the real version byte as if it were file data,
-			// permanently desyncing every checksum after it - this needs
-			// real margin above the worst gap seen so far, not just enough
-			// to cover it exactly.
-			//
-			// Always the full 8s, never shrunk to whatever time happens to
-			// be left before the deadline: a shrinking window can be fooled
-			// by a steady-but-not-actually-quiet stream (e.g. a crashed or
-			// corrupted REMOTCCP.COM emitting garbage every second or two,
-			// comfortably under a full settle window but longer than an
-			// almost-exhausted one) into looking "quiet" just because the
-			// window checked was too short to catch the next byte - exactly
-			// how a misbehaving device on real hardware once got mistaken
-			// for a genuinely idle one. Overshooting timeoutMs by up to one
-			// full settle window is a fine trade for not doing that again;
-			// the outer loop's own deadline check still catches a
-			// genuinely-idle-forever case (the settle call always resolves
-			// eventually) as a hard timeout, just not exactly at timeoutMs.
-			if (await this.waitQuiet(8000)) {
-				return byte;
-			}
-		}
-		throw new Error('Remote CCP: timed out waiting for startup to settle');
+	async waitForStartup(preambleLength: number, timeoutMs = 40000): Promise<number> {
+		await this.readBytes(preambleLength, timeoutMs);
+		return this.readByte(timeoutMs);
 	}
 
 	async quit(): Promise<void> {
 		this.writeLine('Q');
 		await this.readByte(); // ACK
+		await this.waitForCcpPrompt();
+	}
+
+	/**
+	 * Drains and discards bytes after Q's ACK until the CCP's own prompt
+	 * (a drive letter A-P followed by '>') reappears, or timeoutMs elapses.
+	 * REMOTCCP.COM's exit and the CCP's warm boot back to its command loop
+	 * happen on the device after the ACK, outside the Remote CCP protocol
+	 * proper - nothing else reads those bytes. Left unconsumed, quit() would
+	 * return while the device is still mid-exit, and whatever runs next
+	 * (withExclusiveAccess releasing, or the next command) could see that
+	 * trailing "A>" noise or - worse - write into the device before it's
+	 * actually back at a prompt reading its console, the same class of bug
+	 * fixed for hasFileOnDrive()'s DIR check.
+	 */
+	private async waitForCcpPrompt(timeoutMs = 8000): Promise<void> {
+		// Drive letter, optionally followed by a 1-2 digit user-area number -
+		// CP/M 3/MP/M shows e.g. "A2>" for a non-zero user area, not just "A>".
+		const promptPattern = /[A-P]\d{0,2}>/;
+		let tail = '';
+		const deadline = Date.now() + timeoutMs;
+		while (Date.now() < deadline) {
+			let byte: number;
+			try {
+				byte = await this.readByte(deadline - Date.now());
+			} catch {
+				return; // best-effort, same as quit()'s own callers
+			}
+			tail = (tail + String.fromCharCode(byte)).slice(-6);
+			if (promptPattern.test(tail)) {
+				return;
+			}
+		}
 	}
 
 	async currentDrive(): Promise<string> {
@@ -247,12 +231,19 @@ export class RemoteCcpClient {
 	 * assembly sends the same bare EOT either way). Check listFiles() first
 	 * if that distinction matters.
 	 */
-	async getFile(fileName: string, onProgress?: (bytesReceived: number) => void): Promise<Buffer> {
+	async getFile(
+		fileName: string,
+		onProgress?: (bytesReceived: number) => void,
+		isCancelled?: () => boolean
+	): Promise<Buffer> {
 		this.writeLine(`FG${fileName}`);
 		const chunks: Buffer[] = [];
 		let totalBytes = 0;
 
 		while (true) {
+			if (isCancelled?.()) {
+				throw new TransferCancelledError(fileName);
+			}
 			const first = await this.readByte(60000);
 			if (first === EOT) {
 				return Buffer.concat(chunks);
@@ -277,7 +268,12 @@ export class RemoteCcpClient {
 	}
 
 	/** Writes `data` to `fileName` on the device, replacing it if it already exists. */
-	async putFile(fileName: string, data: Buffer, onProgress?: (bytesSent: number) => void): Promise<void> {
+	async putFile(
+		fileName: string,
+		data: Buffer,
+		onProgress?: (bytesSent: number) => void,
+		isCancelled?: () => boolean
+	): Promise<void> {
 		this.writeLine(`FP${fileName}`);
 
 		// F_DELETE/F_MAKE are real disk I/O and can take a while - wait for
@@ -296,6 +292,9 @@ export class RemoteCcpClient {
 		const padded = padTo128(data);
 
 		for (let offset = 0; offset < padded.length; offset += 128) {
+			if (isCancelled?.()) {
+				throw new TransferCancelledError(fileName);
+			}
 			const block = padded.subarray(offset, offset + 128);
 			const hex = block.toString('hex').toUpperCase() + toHex2(checksum(block));
 

@@ -1,12 +1,15 @@
 import * as vscode from 'vscode';
 import { SerialTerminal } from './serialTerminal';
 import { SerialTerminalPanel } from './serialTerminalPanel';
+import { DebugPanel } from './debugPanel';
 import { CpmFileExplorer, CpmFileItem } from './fileExplorer';
 import { LocalFileExplorer, LocalFileSystemItem } from './localFileExplorer';
 import { BuildManager } from './build';
+import { TransfersView, TransferTreeItem, TransferDecorationProvider } from './transfersView';
 
 let serialTerminal: SerialTerminal | undefined;
 let serialTerminalPanel: SerialTerminalPanel | undefined;
+let debugPanel: DebugPanel | undefined;
 let cpmFileExplorer: CpmFileExplorer | undefined;
 let localFileExplorer: LocalFileExplorer | undefined;
 let buildManager: BuildManager | undefined;
@@ -46,6 +49,30 @@ async function pickTargetDrive(terminal: SerialTerminal): Promise<string | undef
 	return picked?.value;
 }
 
+/**
+ * Single file: prompts for a target drive as before. Multiple files: uses
+ * whatever drive the CCP is currently sitting on rather than prompting - the
+ * point of a multi-file send is firing them all off in one go, and grouping
+ * them onto one drive is also what lets SerialTerminal's shared-session
+ * batching (one REMOTCCP.COM/SLIDECPM.COM launch for the whole batch) apply.
+ */
+async function resolveTargetDrive(terminal: SerialTerminal, fileCount: number): Promise<string | undefined> {
+	if (fileCount > 1) {
+		if (!terminal.isOpen) {
+			vscode.window.showErrorMessage('Serial port not connected');
+			return undefined;
+		}
+		const drive = terminal.activeDrive;
+		if (!drive) {
+			vscode.window.showErrorMessage(
+				'Current CP/M drive is not known yet - let the terminal settle on a prompt first, then retry'
+			);
+		}
+		return drive;
+	}
+	return pickTargetDrive(terminal);
+}
+
 export function activate(context: vscode.ExtensionContext) {
 	console.log('CP/M IDE extension is now active');
 
@@ -55,10 +82,17 @@ export function activate(context: vscode.ExtensionContext) {
 	// Initialize the webview panel (right-side split panel)
 	serialTerminalPanel = new SerialTerminalPanel(serialTerminal, context.extensionUri);
 
+	// DDT's own prompt/status output gets routed here while a debug session
+	// is active (SerialTerminal.routeDdtResponse()) - it shows/reveals itself
+	// automatically, no command/menu entry needed.
+	debugPanel = new DebugPanel(serialTerminal, serialTerminalPanel, context.extensionUri);
+
 	// Initialize file explorer
 	cpmFileExplorer = new CpmFileExplorer(serialTerminal);
 	cpmFilesView = vscode.window.createTreeView('cpmFilesExplorer', {
-		treeDataProvider: cpmFileExplorer
+		treeDataProvider: cpmFileExplorer,
+		// Multiple files can be downloaded in one go via ctrl/shift-click.
+		canSelectMany: true
 	});
 	updateConnectionUi(false);
 
@@ -70,9 +104,20 @@ export function activate(context: vscode.ExtensionContext) {
 		canSelectMany: true
 	});
 
+	// Live queue of auto file transfers (manual XMODEM never joins this queue).
+	const transfersView = new TransfersView(serialTerminal.transferQueue);
+	const transfersTreeView = vscode.window.createTreeView('cpmTransfersView', {
+		treeDataProvider: transfersView
+	});
+	const transferDecorations = vscode.window.registerFileDecorationProvider(
+		new TransferDecorationProvider(serialTerminal.transferQueue)
+	);
+
 	context.subscriptions.push(
 		cpmFilesView,
-		localFilesView
+		localFilesView,
+		transfersTreeView,
+		transferDecorations
 	);
 
 	// Initialize build manager
@@ -98,6 +143,38 @@ export function activate(context: vscode.ExtensionContext) {
 					localFileExplorer?.refresh();
 				}
 			}
+		}),
+
+		vscode.commands.registerCommand('cpm-ide.debugAssember', async (item: LocalFileSystemItem) => {
+			if (!buildManager || !serialTerminal || !item?.resourceUri) {
+				return;
+			}
+
+			const comPath = await buildManager.assembleFile(item.resourceUri.fsPath);
+			if (!comPath) {
+				return;
+			}
+			localFileExplorer?.refresh();
+
+			// No cpmFileExplorer refresh here even though DDT.COM/the .com file
+			// just landed on the device - DDT is now running and owns the
+			// console, so any further automated DIR/drive-select traffic
+			// (what a refresh sends) would land IN the DDT session instead of
+			// at a CCP prompt, corrupting it. No serialTerminalPanel.show()
+			// either - the DEBUG panel already reveals itself on entering
+			// DDT_MODE (DebugPanel's own onDdtModeChanged subscription);
+			// showing the main terminal here would just steal focus back.
+			await serialTerminal.debugAssemblyFile(comPath);
+		}),
+
+		vscode.commands.registerCommand('cpm-ide.debugRemoteFile', async (fileItem: CpmFileItem) => {
+			if (serialTerminal && fileItem) {
+				await serialTerminal.debugRemoteFile(fileItem.fileName, fileItem.drive);
+			}
+		}),
+
+		vscode.commands.registerCommand('cpm-ide.openDebugPanel', () => {
+			debugPanel?.show();
 		}),
 
 		vscode.commands.registerCommand('cpm-ide.compileFile', async (item: LocalFileSystemItem) => {
@@ -135,31 +212,47 @@ export function activate(context: vscode.ExtensionContext) {
 			}
 		}),
 
-		vscode.commands.registerCommand('cpm-ide.transferFileToDevice', async (fileUri: vscode.Uri) => {
-			if (serialTerminal && fileUri) {
-				const targetDrive = await pickTargetDrive(serialTerminal);
-				if (!targetDrive) {
-					return;
-				}
-				if (await serialTerminal.transferFileToDevice(fileUri.fsPath, targetDrive)) {
-					await cpmFileExplorer?.refreshDrive(targetDrive);
-				}
+		// `selectedUris` is populated by VS Code when multiple resources are
+		// selected in the native Explorer at the time the context menu
+		// action is invoked - falls back to the single clicked one otherwise.
+		vscode.commands.registerCommand('cpm-ide.transferFileToDevice', async (fileUri: vscode.Uri, selectedUris?: vscode.Uri[]) => {
+			if (!serialTerminal) {
+				return;
+			}
+			const uris = (selectedUris && selectedUris.length > 0) ? selectedUris : (fileUri ? [fileUri] : []);
+			if (uris.length === 0) {
+				return;
+			}
+
+			const targetDrive = await resolveTargetDrive(serialTerminal, uris.length);
+			if (!targetDrive) {
+				return;
+			}
+			if (await serialTerminal.sendFilesToDevice(uris.map(u => u.fsPath), targetDrive)) {
+				await cpmFileExplorer?.refreshDrive(targetDrive);
 			}
 		}),
 
 		// Local Files tree items aren't real explorer entries, so VS Code
 		// passes the tree item itself here rather than a Uri - unwrap it.
-		vscode.commands.registerCommand('cpm-ide.transferFileToDeviceFromTree', async (item: LocalFileSystemItem) => {
-			if (!serialTerminal || !item?.resourceUri) {
+		// `selectedItems` is populated the same way as sendFilesSlide below.
+		vscode.commands.registerCommand('cpm-ide.transferFileToDeviceFromTree', async (item: LocalFileSystemItem, selectedItems?: LocalFileSystemItem[]) => {
+			if (!serialTerminal) {
+				return;
+			}
+			const items = (selectedItems && selectedItems.length > 0) ? selectedItems : (item ? [item] : []);
+			const filePaths = items
+				.filter((i) => i?.resourceUri && !i.isDirectory)
+				.map((i) => i.resourceUri!.fsPath);
+			if (filePaths.length === 0) {
 				return;
 			}
 
-			const targetDrive = await pickTargetDrive(serialTerminal);
+			const targetDrive = await resolveTargetDrive(serialTerminal, filePaths.length);
 			if (!targetDrive) {
 				return;
 			}
-
-			if (await serialTerminal.transferFileToDevice(item.resourceUri.fsPath, targetDrive)) {
+			if (await serialTerminal.sendFilesToDevice(filePaths, targetDrive)) {
 				await cpmFileExplorer?.refreshDrive(targetDrive);
 			}
 		}),
@@ -181,21 +274,32 @@ export function activate(context: vscode.ExtensionContext) {
 				return;
 			}
 
-			const targetDrive = await pickTargetDrive(serialTerminal);
+			const targetDrive = await resolveTargetDrive(serialTerminal, filePaths.length);
 			if (!targetDrive) {
 				return;
 			}
 
-			if (await serialTerminal.sendFilesViaSlide(filePaths, targetDrive)) {
+			if (await serialTerminal.sendFilesToDevice(filePaths, targetDrive)) {
 				await cpmFileExplorer?.refreshDrive(targetDrive);
 			}
 		}),
 
-		vscode.commands.registerCommand('cpm-ide.transferFileFromDevice', async (fileItem: CpmFileItem) => {
-			if (serialTerminal && fileItem) {
-				if (await serialTerminal.transferFileFromDevice(fileItem.fileName, fileItem.drive)) {
-					localFileExplorer?.refresh();
-				}
+		// `selectedItems` is populated by VS Code when multiple items are
+		// selected (ctrl/shift-click) at the time the context menu action
+		// is invoked - falls back to the single clicked item otherwise.
+		vscode.commands.registerCommand('cpm-ide.transferFileFromDevice', async (fileItem: CpmFileItem, selectedItems?: CpmFileItem[]) => {
+			if (!serialTerminal) {
+				return;
+			}
+			const items = (selectedItems && selectedItems.length > 0) ? selectedItems : (fileItem ? [fileItem] : []);
+			if (items.length === 0) {
+				return;
+			}
+
+			if (await serialTerminal.receiveFilesFromDevice(
+				items.map(i => ({ fileName: i.fileName, drive: i.drive, sizeBytes: i.sizeBytes }))
+			)) {
+				localFileExplorer?.refresh();
 			}
 		}),
 
@@ -284,6 +388,12 @@ export function activate(context: vscode.ExtensionContext) {
 			cpmFileExplorer?.refresh();
 		}),
 
+		vscode.commands.registerCommand('cpm-ide.cancelTransfer', (item: TransferTreeItem) => {
+			if (item) {
+				serialTerminal?.transferQueue.cancel(item.transfer.id);
+			}
+		}),
+
 		vscode.commands.registerCommand('cpm-ide.runCommsTest', async () => {
 			try {
 				const result = await serialTerminal!.runCommsTest();
@@ -357,7 +467,8 @@ function updateConnectionUi(connected: boolean, portName?: string) {
 	}
 
 	if (!connected) {
-		cpmFilesView.message = 'Status: Disconnected';
+		// cpmFilesView.message = 'Status: Disconnected';
+		// new viewMessage will be ther instead
 		return;
 	}
 

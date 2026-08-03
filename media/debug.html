@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src {{cspSource}}; script-src {{cspSource}}; font-src {{cspSource}};">
+<link rel="stylesheet" href="{{styleUri}}">
+<link rel="stylesheet" href="{{debugStyleUri}}">
+<link rel="stylesheet" href="{{codiconCssUri}}">
+</head>
+<body>
+<div id="debug-toolbar">
+  <button id="btn-step" title="Step: single-step one instruction (T)" disabled><span class="codicon codicon-debug-step-into"></span></button>
+  <button id="btn-step-over" title="Step Over: steps, but runs a CALL to completion instead of stepping into it" disabled><span class="codicon codicon-debug-step-over"></span></button>
+  <button id="btn-go" title="Go: run from the current PC with no breakpoint (G)" disabled><span class="codicon codicon-debug-start"></span></button>
+  <button id="btn-restart" title="Restart: sends Ctrl-C, then relaunches DDT against the same file"><span class="codicon codicon-debug-restart"></span></button>
+  <button id="btn-end-session" title="End Session: sends Ctrl-C and closes this panel"><span class="codicon codicon-debug-stop"></span></button>
+</div>
+<div id="output" tabindex="0"></div>
+<div id="registers">
+  <div class="reg-row">
+    <span class="reg-label">A</span><span id="reg-A" class="reg-val">--</span>
+    <span class="reg-label">B</span><span id="reg-B" class="reg-val">----</span>
+    <span class="reg-label">D</span><span id="reg-D" class="reg-val">----</span>
+    <span class="reg-label">H</span><span id="reg-H" class="reg-val">----</span>
+    <span class="reg-label">S</span><span id="reg-S" class="reg-val">----</span>
+    <span class="reg-label">P</span><span id="reg-P" class="reg-val">----</span>
+  </div>
+  <div class="reg-row">
+    <span class="reg-label">C</span><span id="flag-C" class="reg-val flag">-</span>
+    <span class="reg-label">Z</span><span id="flag-Z" class="reg-val flag">-</span>
+    <span class="reg-label">M</span><span id="flag-M" class="reg-val flag">-</span>
+    <span class="reg-label">E</span><span id="flag-E" class="reg-val flag">-</span>
+    <span class="reg-label">I</span><span id="flag-I" class="reg-val flag">-</span>
+    <span id="reg-disasm" class="reg-disasm"></span>
+  </div>
+</div>
+<div id="listing" hidden>
+  <div class="listing-line"></div>
+  <div class="listing-line"></div>
+  <div class="listing-line"></div>
+  <div class="listing-line"></div>
+  <div class="listing-line"></div>
+  <div class="listing-line current"></div>
+  <div class="listing-line"></div>
+  <div class="listing-line"></div>
+  <div class="listing-line"></div>
+  <div class="listing-line"></div>
+  <div class="listing-line"></div>
+</div>
+<script type="module" src="{{scriptUri}}"></script>
+</body>
+</html>

@@ -12,6 +12,7 @@ import {
   WIN_SIZE,
   sleep
 } from "./protocol.js";
+import { TransferCancelledError } from "../transferQueue.js";
 
 export async function sendSession(
   portName: string,
@@ -39,7 +40,13 @@ export async function sendSession(
  * the VS Code extension (which builds a session directly from the
  * terminal's already-open shared connection).
  */
-export async function sendFiles(session: SerialSession, files: string[], debug: boolean): Promise<void> {
+export async function sendFiles(
+  session: SerialSession,
+  files: string[],
+  debug: boolean,
+  onProgress?: (bytesTransferred: number) => void,
+  isCancelled?: () => boolean
+): Promise<void> {
   for (const f of files) {
     await fs.access(f);
   }
@@ -52,7 +59,14 @@ export async function sendFiles(session: SerialSession, files: string[], debug: 
   for (let i = 0; i < files.length; i += 1) {
     const filename = files[i];
     console.log(`\n-- File ${i + 1}/${files.length}: ${filename} --`);
-    totalBytes += await sendOneFile(session, filename, debug);
+    const bytesBeforeThisFile = totalBytes;
+    totalBytes += await sendOneFile(
+      session,
+      filename,
+      debug,
+      (bytesInFile) => onProgress?.(bytesBeforeThisFile + bytesInFile),
+      isCancelled
+    );
   }
 
   if (debug) {
@@ -99,7 +113,13 @@ async function handshakeAsSender(session: SerialSession, debug: boolean): Promis
   await session.clearInput();
 }
 
-async function sendOneFile(session: SerialSession, filename: string, debug: boolean): Promise<number> {
+async function sendOneFile(
+  session: SerialSession,
+  filename: string,
+  debug: boolean,
+  onProgress?: (bytesInFile: number) => void,
+  isCancelled?: () => boolean
+): Promise<number> {
   const fileStart = Date.now();
   const fileDataRaw = await fs.readFile(filename);
   const filesize = fileDataRaw.length;
@@ -138,6 +158,9 @@ async function sendOneFile(session: SerialSession, filename: string, debug: bool
   let eofSent = false;
 
   while (sendIdx < frames.length) {
+    if (isCancelled?.()) {
+      throw new TransferCancelledError(displayName);
+    }
     const windowEnd = Math.min(sendIdx + WIN_SIZE, frames.length);
 
     for (let i = sendIdx; i < windowEnd; i += 1) {
@@ -198,6 +221,7 @@ async function sendOneFile(session: SerialSession, filename: string, debug: bool
       if (ctrl.seq === eofSeq) {
         sendIdx = frames.length;
       }
+      onProgress?.(Math.min(sendIdx * FRAME_SIZE, filesize));
       continue;
     }
 
@@ -214,6 +238,7 @@ async function sendOneFile(session: SerialSession, filename: string, debug: bool
   if (!eofSent) {
     await session.writeBytes(buildFrame(eofSeq, Buffer.alloc(0)));
   }
+  onProgress?.(filesize);
 
   try {
     await session.recvControl(2000);

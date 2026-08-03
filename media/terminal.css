@@ -94,12 +94,19 @@ hr { border: none; border-top: 1px solid var(--vscode-panel-border); margin: 1px
 }
 #ready-dot.ready { background: #3fb950; box-shadow: 0 0 3px #3fb950; }
 #ready-dot.busy { background: #d29922; box-shadow: 0 0 3px #d29922; }
-#output {
+#output-wrap {
   flex: 1;
   min-height: 80px;
+  position: relative;
+  display: flex;
+}
+#output {
+  flex: 1;
+  min-height: 0;
   background: var(--vscode-terminal-background, #1e1e1e);
   color: var(--vscode-terminal-foreground, #cccccc);
   font-family: var(--vscode-editor-font-family, 'Courier New', monospace);
+  font-weight: var(--vscode-editor-font-weight, normal);
   font-size: 12px;
   line-height: 1.4;
   padding: 4px 6px;
@@ -111,6 +118,37 @@ hr { border: none; border-top: 1px solid var(--vscode-panel-border); margin: 1px
 }
 #output:focus { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
 #output.flash { filter: invert(1); }
+
+/* Shown while a background task (drive scan, DIR listing, file transfer)
+   has exclusive control of the line - sendData() silently drops keystrokes
+   during that window, so this makes "typing won't do anything right now"
+   obvious rather than something the user only discovers by trying. */
+#busy-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 13px;
+  pointer-events: none;
+  z-index: 10;
+}
+#busy-overlay[hidden] { display: none; }
+#busy-overlay .spinner {
+  width: 26px;
+  height: 26px;
+  border: 3px solid rgba(255, 255, 255, 0.25);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: busy-spinner-spin 0.8s linear infinite;
+}
+@keyframes busy-spinner-spin {
+  to { transform: rotate(360deg); }
+}
 .term-cursor { animation: term-cursor-blink 1s steps(1) infinite; }
 @keyframes term-cursor-blink {
   0%, 49% {
@@ -129,7 +167,7 @@ hr { border: none; border-top: 1px solid var(--vscode-panel-border); margin: 1px
   text-transform: uppercase;
   letter-spacing: 0.5px;
   padding: 2px 6px;
-  color: var(--vscode-descriptionForeground);
+  color: green;
   background: var(--vscode-sideBarSectionHeader-background, rgba(128,128,128,0.08));
   border-bottom: 1px solid var(--vscode-panel-border, #444);
 }
@@ -139,6 +177,6 @@ hr { border: none; border-top: 1px solid var(--vscode-panel-border); margin: 1px
   font-family: var(--vscode-editor-font-family, monospace);
   font-size: 10px;
   padding: 3px 6px;
-  color: var(--vscode-descriptionForeground);
+  color: green;
 }
 #activity-log div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

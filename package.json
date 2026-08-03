@@ -3,7 +3,7 @@
   "displayName": "CP/M IDE",
   "icon": "media/icon.png",
   "description": "VS Code extension for CP/M application development with serial terminal and file transfer",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "publisher": "rockcat",
   "engines": {
     "vscode": "^1.80.0"
@@ -29,7 +29,8 @@
     "onCommand:cpm-ide.openSerialTerminal",
     "onCommand:cpm-ide.transferLocalFileToDevice",
     "onView:cpmFilesExplorer",
-    "onView:cpmLocalFilesExplorer"
+    "onView:cpmLocalFilesExplorer",
+    "onView:cpmTransfersView"
   ],
   "contributes": {
     "languages": [
@@ -136,6 +137,24 @@
         "enablement": "cpmIde.assemblerConfigured"
       },
       {
+        "command": "cpm-ide.debugAssember",
+        "title": "CP/M IDE: Debug Assembly",
+        "icon": "$(debug-alt)",
+        "enablement": "cpmIde.assemblerConfigured"
+      },
+      {
+        "command": "cpm-ide.debugRemoteFile",
+        "title": "CP/M IDE: Debug (DDT, no transfer)",
+        "icon": "$(debug-alt)",
+        "enablement": "cpmIde.connected"
+      },
+      {
+        "command": "cpm-ide.openDebugPanel",
+        "title": "CP/M IDE: Open DDT Debug Panel",
+        "icon": "$(debug-console)",
+        "enablement": "cpmIde.connected"
+      },
+      {
         "command": "cpm-ide.compileFile",
         "title": "CP/M IDE: Compile",
         "icon": "$(tools)",
@@ -155,6 +174,11 @@
       {
         "command": "cpm-ide.runCommsTest",
         "title": "CP/M IDE: Run Serial Comms Test (DIR)"
+      },
+      {
+        "command": "cpm-ide.cancelTransfer",
+        "title": "CP/M IDE: Cancel Transfer",
+        "icon": "$(close)"
       }
     ],
     "viewsContainers": {
@@ -175,15 +199,31 @@
         {
           "id": "cpmLocalFilesExplorer",
           "name": "Local Files"
+        },
+        {
+          "id": "cpmTransfersView",
+          "name": "Transfers"
         }
       ]
     },
+    "viewsWelcome": [
+      {
+        "view": "cpmFilesExplorer",
+        "contents": "Connect to your CP/M Device and sync the file list here.\n[Connect Device](command:cpm-ide.openSerialTerminal)\n",
+        "when": "cpmIde.connected == false"
+      }
+    ],
     "menus": {
       "view/title": [
         {
           "command": "cpm-ide.openSerialTerminal",
           "when": "view == cpmFilesExplorer",
           "group": "navigation@1"
+        },
+        {
+          "command": "cpm-ide.openDebugPanel",
+          "when": "view == cpmFilesExplorer && cpmIde.connected",
+          "group": "navigation@2"
         },
         {
           "command": "cpm-ide.refreshFileExplorer",
@@ -209,7 +249,17 @@
       "view/item/context": [
         {
           "command": "cpm-ide.transferFileFromDevice",
-          "when": "view == cpmFilesExplorer && viewItem == cpmFile && cpmIde.connected",
+          "when": "view == cpmFilesExplorer && viewItem =~ /^cpmFile/ && cpmIde.connected",
+          "group": "inline"
+        },
+        {
+          "command": "cpm-ide.debugRemoteFile",
+          "when": "view == cpmFilesExplorer && viewItem == cpmFile-com && cpmIde.connected",
+          "group": "inline"
+        },
+        {
+          "command": "cpm-ide.cancelTransfer",
+          "when": "view == cpmTransfersView && viewItem == transferItem",
           "group": "inline"
         },
         {
@@ -224,6 +274,11 @@
         },
         {
           "command": "cpm-ide.assembleFile",
+          "when": "view == cpmLocalFilesExplorer && viewItem == localFile-asm && cpmIde.assemblerConfigured",
+          "group": "inline"
+        },
+        {
+          "command": "cpm-ide.debugAssember",
           "when": "view == cpmLocalFilesExplorer && viewItem == localFile-asm && cpmIde.assemblerConfigured",
           "group": "inline"
         },
@@ -322,6 +377,11 @@
             "default": "#cccccc",
             "description": "Text color for the CP/M terminal output."
           },
+          "cpmIde.fontFamily": {
+            "type": "string",
+            "default": "",
+            "description": "Font for the CP/M terminal output, chosen from local monospaced fonts (Font dropdown, shown only when the browser supports local font access). Empty uses the editor's default font."
+          },
           "cpmIde.terminalSize": {
             "type": "string",
             "default": "80x25",
@@ -333,14 +393,41 @@
             ],
             "description": "Fixed character grid for the CP/M terminal display. The font size is scaled to fit this many columns/rows into the available panel space."
           },
-          "cpmIde.target": {
+          "cpmIde.emulation": {
+            "type": "string",
+            "default": "Vt52",
+            "enum": [
+              "None",
+              "Vt52",
+              "ANSI"
+            ],
+            "description": "Terminal emulation used to interpret incoming escape sequences and encode special keystrokes (arrows, etc.). None does no escape interpretation."
+          },
+          "cpmIde.transferApplication": {
+            "type": "string",
+            "default": "REMOTCCP.COM",
+            "enum": [
+              "REMOTCCP.COM",
+              "SLIDECPM.COM",
+              "XMODEM.COM"
+            ],
+            "description": "CP/M program used for all auto file transfers (uploads and downloads) - checked for presence on the target/source drive before each transfer. SLIDECPM.COM doesn't support downloads yet."
+          },
+          "cpmIde.deviceType": {
             "type": "string",
             "default": "Generic",
             "enum": [
               "Generic",
-              "MicroBeast"
+              "microBeast",
+              "z80 MBC",
+              "PicoCP/M2.2"
             ],
-            "description": "Target CP/M hardware. MicroBeast requires running ALWRITE after Remote CCP (REMOTCCP.COM) is successfully installed on the device."
+            "description": "CP/M hardware device type. Controls device-specific behavior and the secondary device toolbar in the terminal panel."
+          },
+          "cpmIde.autoWrite": {
+            "type": "boolean",
+            "default": true,
+            "description": "microBeast only: automatically run ALWRITE after Remote CCP (REMOTCCP.COM) is successfully installed on the device."
           }
         }
       },
@@ -409,11 +496,11 @@
     ]
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
+    "vscode:prepublish": "npm run compile && npm run assemble",
     "compile": "tsc -p ./",
     "assemble": "npm run assemble-remote && npm run assemble-xmodem",
-    "assemble-remote": "cd remote && zasm remotccp.asm -o remotccp.com && zasm --target=ram -x remotccp.asm",
-    "assemble-xmodem": "cd remote && zasm --asm8080 xmodem.asm -o xmodem.com && zasm --asm8080 --target=ram -x xmodem.asm",
+    "assemble-remote": "cd remote && zasm remotccp.asm -o REMOTCCP.COM && zasm --target=ram -x remotccp.asm",
+    "assemble-xmodem": "cd remote && zasm --asm8080 xmodem.asm -o XMODEM.COM && zasm --asm8080 --target=ram -x xmodem.asm",
     "watch": "tsc -watch -p ./",
     "pretest": "npm run compile && npm run lint",
     "lint": "eslint src --ext ts",
@@ -435,6 +522,7 @@
   },
   "dependencies": {
     "@serialport/bindings": "^10.0.1",
+    "@vscode/codicons": "^0.0.46-24",
     "serialport": "^9.2.0"
   }
 }

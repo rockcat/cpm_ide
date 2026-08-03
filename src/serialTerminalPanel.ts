@@ -3,6 +3,36 @@ import * as fs from 'fs';
 import SerialPort from 'serialport';
 import { SerialTerminal } from './serialTerminal';
 
+/**
+ * Orders port paths the way a person would expect rather than plain string
+ * order, where "COM10" sorts before "COM2" - splits each into alternating
+ * digit/non-digit runs and compares numeric runs by value.
+ */
+function comparePortPaths(a: string, b: string): number {
+	const aParts = a.match(/\d+|\D+/g) ?? [a];
+	const bParts = b.match(/\d+|\D+/g) ?? [b];
+	const len = Math.max(aParts.length, bParts.length);
+	for (let i = 0; i < len; i++) {
+		const aPart = aParts[i] ?? '';
+		const bPart = bParts[i] ?? '';
+		if (aPart === bPart) {
+			continue;
+		}
+		if (/^\d+$/.test(aPart) && /^\d+$/.test(bPart)) {
+			const diff = Number(aPart) - Number(bPart);
+			if (diff !== 0) {
+				return diff;
+			}
+		} else {
+			const cmp = aPart.localeCompare(bPart);
+			if (cmp !== 0) {
+				return cmp;
+			}
+		}
+	}
+	return 0;
+}
+
 export class SerialTerminalPanel {
 	private _panel: vscode.WebviewPanel | undefined;
 	private _disposables: vscode.Disposable[] = [];
@@ -11,6 +41,11 @@ export class SerialTerminalPanel {
 		private readonly serialTerminal: SerialTerminal,
 		private readonly extensionUri: vscode.Uri
 	) {}
+
+	/** This panel's current column, if it's open - lets DebugPanel position itself just to the right of it. */
+	get viewColumn(): vscode.ViewColumn | undefined {
+		return this._panel?.viewColumn;
+	}
 
 	/** The rightmost currently-open editor group, so the terminal joins it as a tab instead of always splitting open a new column. */
 	private rightmostViewColumn(): vscode.ViewColumn {
@@ -73,7 +108,7 @@ export class SerialTerminalPanel {
 						const ports = await SerialPort.list();
 						this._panel?.webview.postMessage({
 							command: 'portList',
-							ports: ports.map((p: any) => p.path),
+							ports: ports.map((p: any) => p.path).sort(comparePortPaths),
 						});
 					} catch (err) {
 						console.error('Failed to list ports:', err);
@@ -84,7 +119,8 @@ export class SerialTerminalPanel {
 				case 'updateSetting': {
 					const allowedKeys = [
 						'serialPort', 'baudRate', 'dataBits', 'stopBits', 'parity',
-						'flowControl', 'enableSerialTrace', 'forceCapitals', 'terminalSize', 'textColor', 'target'
+						'flowControl', 'enableSerialTrace', 'forceCapitals', 'terminalSize', 'textColor',
+						'deviceType', 'autoWrite', 'emulation', 'fontFamily'
 					];
 					if (allowedKeys.includes(msg.key)) {
 						await vscode.workspace.getConfiguration('cpmIde')
@@ -114,6 +150,12 @@ export class SerialTerminalPanel {
 					}
 					break;
 				}
+				case 'setTransferApplication':
+					await vscode.workspace.getConfiguration('cpmIde')
+						.update('transferApplication', msg.value, vscode.ConfigurationTarget.Global);
+					break;
+				default:
+					console.warn('Unknown message command:', msg.command);
 			}
 		}, null, this._disposables);
 
@@ -178,7 +220,11 @@ export class SerialTerminalPanel {
 			forceCapitals: settings.get<boolean>('forceCapitals') ?? true,
 			terminalSize: settings.get<string>('terminalSize') ?? '80x25',
 			textColor: settings.get<string>('textColor') ?? '#cccccc',
-			target: settings.get<string>('target') ?? 'Generic',
+			deviceType: settings.get<string>('deviceType') ?? 'Generic',
+			autoWrite: settings.get<boolean>('autoWrite') ?? true,
+			emulation: settings.get<string>('emulation') ?? 'Vt52',
+			fontFamily: settings.get<string>('fontFamily') ?? '',
+			transferApplication: settings.get<string>('transferApplication') ?? 'REMOTCCP.COM',
 		};
 	}
 

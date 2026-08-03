@@ -1,10 +1,19 @@
 import * as vscode from 'vscode';
 import { SerialTerminal } from './serialTerminal';
+import { formatFileSize } from './formatFileSize';
+import { ConnectionResetError } from './transferQueue';
 
 export interface CpmFile {
 	name: string;
 	drive: string;
 	type: string;
+	sizeBytes?: number;
+}
+
+/** What both the Remote CCP path (record count) and the plain DIR fallback (name only) can supply. */
+interface CpmFileSource {
+	name: string;
+	recordCount?: number;
 }
 
 export interface CpmDrive {
@@ -25,7 +34,19 @@ export class CpmFileExplorer implements vscode.TreeDataProvider<CpmDriveItem | C
 	}
 
 	async refresh(): Promise<void> {
-		await this.loadDrivesAndFiles();
+		try {
+			await this.loadDrivesAndFiles();
+		} catch (error) {
+			if (error instanceof ConnectionResetError || !this.serialTerminal.isOpen) {
+				// The connection was reset mid-scan (or a stale Remote CCP
+				// read simply timed out after one, well after the
+				// disconnect itself) - serialTerminal's own onDisconnect
+				// handler already clears this tree, so there's nothing left
+				// to do here either way.
+				return;
+			}
+			throw error;
+		}
 		this._onDidChangeTreeData.fire(undefined);
 	}
 
@@ -36,15 +57,25 @@ export class CpmFileExplorer implements vscode.TreeDataProvider<CpmDriveItem | C
 	 * device I/O for information we already have.
 	 */
 	async refreshDrive(drive: string): Promise<void> {
-		await this.serialTerminal.withExclusiveAccess(`Refreshing ${drive}: file list…`, async () => {
-			try {
-				const files = await this.serialTerminal.listFilesViaRemoteCcp(drive)
-					?? await this.serialTerminal.getDirListing(drive);
-				this.storeFileList(drive, files);
-			} catch (error) {
-				// Leave the previous listing for this drive in place.
+		try {
+			await this.serialTerminal.withExclusiveAccess(`Refreshing ${drive}: file list…`, async () => {
+				try {
+					const files = await this.serialTerminal.listFilesViaRemoteCcp(drive)
+						?? (await this.serialTerminal.getDirListing(drive)).map(name => ({ name }));
+					this.storeFileList(drive, files);
+				} catch (error) {
+					if (error instanceof ConnectionResetError || !this.serialTerminal.isOpen) {
+						throw error;
+					}
+					// Leave the previous listing for this drive in place.
+				}
+			});
+		} catch (error) {
+			if (error instanceof ConnectionResetError || !this.serialTerminal.isOpen) {
+				return;
 			}
-		});
+			throw error;
+		}
 		this._onDidChangeTreeData.fire(undefined);
 	}
 
@@ -53,15 +84,23 @@ export class CpmFileExplorer implements vscode.TreeDataProvider<CpmDriveItem | C
 		this._onDidChangeTreeData.fire(undefined);
 	}
 
-	private toCpmFiles(drive: string, files: string[]): CpmFile[] {
-		return files.map(f => ({
-			name: f,
-			drive: drive,
-			type: f.split('.')[1] || 'FILE',
-		}));
+	/**
+	 * recordCount (128-byte CP/M records, from the Remote CCP FL command)
+	 * converts straight to a byte size; the plain DIR fallback has no size
+	 * info at all, so sizeBytes is left undefined for those entries.
+	 */
+	private toCpmFiles(drive: string, files: CpmFileSource[]): CpmFile[] {
+		return files
+			.map(f => ({
+				name: f.name,
+				drive: drive,
+				type: f.name.split('.')[1] || 'FILE',
+				sizeBytes: f.recordCount !== undefined ? f.recordCount * 128 : undefined,
+			}))
+			.sort((a, b) => a.name.localeCompare(b.name));
 	}
 
-	private storeFileList(drive: string, files: string[]): void {
+	private storeFileList(drive: string, files: CpmFileSource[]): void {
 		this.drives.set(drive, this.toCpmFiles(drive, files));
 	}
 
@@ -91,8 +130,13 @@ export class CpmFileExplorer implements vscode.TreeDataProvider<CpmDriveItem | C
 			for (const drive of drives) {
 				try {
 					const files = await this.serialTerminal.getDirListing(drive);
-					scanned.set(drive, this.toCpmFiles(drive, files));
+					scanned.set(drive, this.toCpmFiles(drive, files.map(name => ({ name }))));
 				} catch (error) {
+					if (error instanceof ConnectionResetError || !this.serialTerminal.isOpen) {
+						// Stop entirely rather than ploughing through the
+						// remaining drives against a connection that's gone.
+						throw error;
+					}
 					// Drive no longer responds to a DIR listing - drop it
 					// rather than keeping its last-known file list around.
 				}
@@ -114,7 +158,7 @@ export class CpmFileExplorer implements vscode.TreeDataProvider<CpmDriveItem | C
 		if (element instanceof CpmDriveItem) {
 			// Show files in this drive
 			const files = this.drives.get(element.drive) || [];
-			return files.map(file => new CpmFileItem(file.name, file.drive, file.type));
+			return files.map(file => new CpmFileItem(file.name, file.drive, file.type, file.sizeBytes));
 		}
 
 		return [];
@@ -133,10 +177,15 @@ export class CpmFileItem extends vscode.TreeItem {
 	constructor(
 		public fileName: string,
 		public drive: string,
-		public fileType: string
+		public fileType: string,
+		public sizeBytes?: number
 	) {
 		super(fileName);
-		this.contextValue = 'cpmFile';
+		// Suffixed for .COM specifically so the "Debug" inline button
+		// (launch DDT directly against a file already on the device, no
+		// transfer) can target just those, while "Download" still matches
+		// any file via a `viewItem =~ /^cpmFile/` when-clause.
+		this.contextValue = fileType === 'COM' ? 'cpmFile-com' : 'cpmFile';
 
 		// Set icon based on file type
 		if (['COM', 'EXE', 'BIN'].includes(fileType)) {
@@ -148,5 +197,9 @@ export class CpmFileItem extends vscode.TreeItem {
 		}
 
 		this.tooltip = `${fileName} on drive ${drive}:`;
+		if (sizeBytes !== undefined) {
+			this.description = formatFileSize(sizeBytes);
+			this.tooltip += ` (${formatFileSize(sizeBytes)})`;
+		}
 	}
 }

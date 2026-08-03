@@ -69,9 +69,11 @@ export class BuildManager {
 
 	/**
 	 * Assembles a single file, independent of the full-project build - used
-	 * by the Local Files tree's per-file "Assemble" action.
+	 * by the Local Files tree's per-file "Assemble" (and "Debug Assembly")
+	 * actions. Returns the resulting .com file's path on success (still
+	 * truthy-checkable like the old boolean return), undefined on failure.
 	 */
-	async assembleFile(filePath: string): Promise<boolean> {
+	async assembleFile(filePath: string): Promise<string | undefined> {
 		this.buildChannel.clear();
 		this.buildChannel.show();
 
@@ -84,12 +86,18 @@ export class BuildManager {
 			this.buildChannel.appendLine('');
 			await this.buildAssemblyFile(filePath, assembler, workspaceDir);
 			vscode.window.showInformationMessage(`Assembled ${path.basename(filePath)}`);
-			return true;
+			return this.getAssembledComPath(filePath);
 		} catch (error) {
 			this.buildChannel.appendLine(`Assemble failed: ${error}`);
 			vscode.window.showErrorMessage(`Assemble failed: ${error}`);
-			return false;
+			return undefined;
 		}
+	}
+
+	/** Deterministic output path buildAssemblyFile() writes an .asm file to - same directory, same base name, .com extension. */
+	
+	getAssembledComPath(asmFilePath: string): string {
+		return path.join(path.dirname(asmFilePath), path.parse(asmFilePath).name + '.com');
 	}
 
 	/**
@@ -159,8 +167,8 @@ export class BuildManager {
 
 	private async buildAssemblyFile(asmFile: string, assembler: string, workspaceDir: string): Promise<void> {
 		const fileName = path.basename(asmFile);
-		const outputName = path.basename(asmFile, '.asm') + '.com';
-		const outputPath = path.join(path.dirname(asmFile), outputName);
+		const outputPath = this.getAssembledComPath(asmFile);
+		const outputName = path.basename(outputPath);
 
 		this.buildChannel.appendLine(`Assembling ${fileName} with ${assembler}...`);
 
@@ -204,9 +212,11 @@ export class BuildManager {
 
 	private async buildCFile(cFile: string, compiler: string, workspaceDir: string): Promise<void> {
 		const fileName = path.basename(cFile);
-		const comName = path.basename(cFile, '.c') + '.com';
+		// See buildAssemblyFile() - path.basename(file, ext) needs an exact
+		// case match to strip ext, so path.parse().name is used instead.
+		const comName = path.parse(cFile).name + '.com';
 		const comPath = path.join(path.dirname(cFile), comName);
-		const objName = path.basename(cFile, '.c') + '.o';
+		const objName = path.parse(cFile).name + '.o';
 		const objPath = path.join(path.dirname(cFile), objName);
 
 		this.buildChannel.appendLine(`Compiling ${fileName} with ${compiler}...`);
@@ -262,7 +272,7 @@ export class BuildManager {
 						if (!item.startsWith('.') && item !== 'node_modules') {
 							recursiveFind(fullPath);
 						}
-					} else if (item.endsWith(extension)) {
+					} else if (item.toLowerCase().endsWith(extension.toLowerCase())) {
 						files.push(fullPath);
 					}
 				}

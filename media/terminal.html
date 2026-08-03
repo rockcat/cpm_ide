@@ -40,8 +40,16 @@
       <select id="termsize"></select>
     </div>
     <div>
-      <label>Target</label>
-      <select id="target"></select>
+      <label>Device type</label>
+      <select id="device-type"></select>
+    </div>
+    <div>
+      <label>Emulation</label>
+      <select id="emulation"></select>
+    </div>
+    <div>
+      <label>Transfer Application</label>
+      <select id="transferapplication"></select>
     </div>
     <div>
       <label for="trace-toggle" class="label-auto">
@@ -61,6 +69,10 @@
         <input type="color" id="text-color" />
       </label>
     </div>
+    <div id="font-control" hidden>
+      <label>Font</label>
+      <select id="font-family"></select>
+    </div>
   </div>
   <div class="row">
     <div>
@@ -74,16 +86,30 @@
     <div id="status" class="disconnected">Disconnected</div>
   </div>
 </div>
+<div class="row" id="device-toolbar" hidden>
+  <div data-device="microBeast" hidden>
+    <label for="auto-write" class="label-auto">
+      <input type="checkbox" id="auto-write" />
+      AutoWrite
+    </label>
+  </div>
+</div>
 <hr>
 <div id="ready-bar">
   <span id="ready-dot"></span>
   <span id="ready-text">Disconnected</span>
 </div>
-<div id="output" tabindex="0"></div>
+<div id="output-wrap">
+  <div id="output" tabindex="0"></div>
+  <div id="busy-overlay" hidden>
+    <div class="spinner"></div>
+    <div id="busy-overlay-text">Syncing…</div>
+  </div>
+</div>
 <div id="activity-panel">
   <div id="activity-header">Background Activity</div>
   <div id="activity-log"></div>
 </div>
-<script src="{{scriptUri}}"></script>
+<script type="module" src="{{scriptUri}}"></script>
 </body>
 </html>

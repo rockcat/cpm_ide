@@ -90,7 +90,10 @@ MAXERR	equ	10	;retries before FG/FP give up on a block
 ;after so a launch on a non-A drive doesn't desync from it before
 ;the command loop even starts.
 ;==============================================================
-START:	ld	c,DRV_GET
+START:
+	ld	(OLD_SP),sp	
+
+	ld	c,DRV_GET
 	call	BDOS
 	ld	e,a
 	push	de
@@ -128,8 +131,12 @@ MLOOP:	call	RDLINE
 	jp	z,DO_F
 	jp	MLOOP		;unrecognised - ignore, wait for next line
 
-DOQUIT:	ld	a,ACK
+DOQUIT:
+	ld	a,ACK
 	call	SNDBYT
+	; saving SP fails
+	; ld	sp,(OLD_SP)	;restore the original stack pointer (if the host
+	; ret				; back to ccp no reboot
 	jp	0		;back to CCP (warm boot)
 
 DO_D:	inc	hl
@@ -687,15 +694,15 @@ PF_UP:	cp	'a'
 ;==============================================================
 ;Data
 ;==============================================================
-DRVIDX:	ds	1
+OLD_SP:  	dw	0000h
+DRVIDX:		ds	1
 ORIGDRV:	ds	1
-CHKSUM:	ds	1
-ERRCNT:	ds	1
-FCBSAV:	ds	2
+CHKSUM:		ds	1
+ERRCNT:		ds	1
+FCBSAV:		ds	2
 BIOSBASE:	ds	2
-
-CMDBUF:	ds	40
-XFCB:	ds	36
-DMABUF:	ds	128
+CMDBUF:		ds	40
+XFCB:		ds	36
+DMABUF:		ds	128
 
 	end

@@ -8,6 +8,8 @@ import { parseDirResponse } from './cpmDirParser';
 import { SerialSession, sendFiles } from './slide-ts';
 import { RemoteCcpClient, RemoteCcpFile } from './remoteCcp';
 import { toIntelHex } from './intelHex';
+import { TransferQueue, TransferCancelledError, ConnectionResetError } from './transferQueue';
+import { ListingLine, parseListingFile } from './listingFile';
 
 /** Filename Remote CCP is bootstrapped/looked up under - 8 chars, CP/M's limit ("REMOTECCP" doesn't fit). */
 const REMOTE_CCP_FILENAME = 'REMOTCCP.COM';
@@ -15,32 +17,75 @@ const REMOTE_CCP_FILENAME = 'REMOTCCP.COM';
 const REMOTE_CCP_COMMAND = 'REMOTCCP';
 
 export class SerialTerminal {
+	readonly transferQueue = new TransferQueue();
 	private port: SerialPort | undefined;
 	private xmodem: XModem;
 	private readonly log: vscode.OutputChannel;
-	private promptRegex = /[A-P]>/;
+	/** A CCP prompt: a drive letter, optionally followed by a 1-2 digit user-area number - CP/M 3/MP/M shows e.g. "A2>" or "B15>" for a non-zero user area, not just "A>". */
+	private promptRegex = /[A-P]\d{0,2}>/;
 	private inputBuffer = '';
 	private hiddenCommandInProgress = false;
 	private lastDataTime = 0;
 	private connectionGeneration = 0;
+	/**
+	 * Serializes withExclusiveAccess() calls against each other - it is
+	 * itself just a busy flag/label around one `work()` call, not a mutex,
+	 * so two calls issued while an earlier one is still running would
+	 * otherwise both proceed to touch the wire at the same time (e.g. an
+	 * auto-refresh on connect racing a refreshDrive() from a just-completed
+	 * transfer), scrambling both operations' reads/writes together. Chaining
+	 * onto this tail - the same pattern TransferQueue already uses for
+	 * transfers specifically - makes every caller wait its turn instead.
+	 */
+	private exclusiveAccessTail: Promise<void> = Promise.resolve();
 	/** Forces trace logging on regardless of the `enableSerialTrace` setting - used by runCommsTest. */
 	private forceTrace = false;
 	/* Forces all input to be converted to uppercase before sending to the device, regardless of what the user typed. */
 	private forceCapitals = true;
 	/** Best-known current CCP drive, tracked from the last "X>" prompt seen. */
 	private currentDrive: string | undefined;
+	/** True from the moment DDT is launched (debugAssemblyFile) until a CCP prompt reappears - see handleSerialData(). */
+	private ddtMode = false;
 	/**
-	 * Whether REMOTCCP.COM is confirmed usable on this connection - undefined
-	 * until first attempted, then sticky until reconnect so we don't retry
-	 * (and re-prompt to install) on every single operation once it's known
-	 * to be unavailable.
+	 * Which DDT command a response is currently in flight for, or undefined
+	 * if DDT is idle at its prompt with nothing outstanding. DDT_MODE has no
+	 * free-typing (see stepDdt()/goDdt()) - every command DDT is ever sent
+	 * comes from exactly one of a handful of known call sites, so this is
+	 * always precisely known rather than inferred: 'launch' for the initial
+	 * `DDT <name>.COM`, 'examine' for `X` (sent both to seed the initial
+	 * register display and automatically after every G stop), 'step' for
+	 * `T`, 'go' for `G` (with or without a start+breakpoint). See
+	 * routeDdtResponse(), which is the only place this changes.
 	 */
-	private remoteCcpAvailable: boolean | undefined;
+	private ddtPending: 'launch' | 'examine' | 'step' | 'go' | undefined = undefined;
+	/**
+	 * The remaining not-yet-echoed-back tail of the command just sent to
+	 * DDT (see beginDdtCommand()/launchDdt()) - unlike anything that might
+	 * follow it, this part is never ambiguous no matter which command it
+	 * is: it's a plain echo of bytes we ourselves just wrote, not the
+	 * debugged program's output. routeDdtResponse() consumes it off the
+	 * front of each incoming chunk (trusted, straight to the DEBUG panel)
+	 * before applying isDdtResponseTrusted()'s logic to whatever's left.
+	 */
+	private ddtPendingEcho = '';
+	/** Unclassified tail of the in-flight command's response not yet resolved as matching DDT's own prompt shape or not - see routeDdtResponse(). */
+	private ddtScanBuffer = '';
+	/**
+	 * True once DDT's own prompt has actually been seen at least once.
+	 * Exit-detection (a CCP prompt reappearing) is only armed after this -
+	 * the very first bytes back after launching DDT are just the console's
+	 * echo of the `DDT <NAME>.COM` command line itself, which (because it
+	 * was typed at a normal CCP prompt) contains a bare "X>" too. Without
+	 * this gate that echo alone reads as "back at the CCP" and ends the
+	 * session before DDT has even printed its banner.
+	 */
+	private ddtSeenPrompt = false;
+	/** What launchDdt() was last called with - kept across a session ending (deliberately not cleared by resetDdtState()) so restartDdt() can relaunch the same target without the caller needing to remember it. */
+	private lastDdtLaunch: { remoteComName: string; drive: string } | undefined;
 	/**
 	 * Manual user override that blocks Remote CCP from being launched or
 	 * installed by the automatic drive-scan/file-listing/transfer paths.
-	 * Unlike remoteCcpAvailable, this is a deliberate choice rather than a
-	 * detection result, so it does NOT reset on reconnect - it stays off
+	 * A deliberate choice, so it does NOT reset on reconnect - it stays off
 	 * until the user turns it back on. The manual "Send REMOTCCP" actions
 	 * bypass this flag entirely, since triggering them IS the user asking
 	 * for Remote CCP traffic despite the toggle.
@@ -74,6 +119,21 @@ export class SerialTerminal {
 	private _onActivity = new vscode.EventEmitter<string>();
 	readonly onActivity = this._onActivity.event;
 
+	/** DDT's own prompt/status output (matched by routeDdtResponse()), bound for the DEBUG panel rather than the main terminal. */
+	private _onDebugData = new vscode.EventEmitter<string>();
+	readonly onDebugData = this._onDebugData.event;
+
+	private _onDdtModeChanged = new vscode.EventEmitter<boolean>();
+	readonly onDdtModeChanged = this._onDdtModeChanged.event;
+
+	/** Fires the parsed .lst matching the file under debug (see loadDdtListingFromPath()), or undefined if none was found/the session ended. */
+	private _onDdtListingChanged = new vscode.EventEmitter<ListingLine[] | undefined>();
+	readonly onDdtListingChanged = this._onDdtListingChanged.event;
+
+	/** Fires once a DDT command's response is fully resolved and ddtPending has cleared - the DEBUG panel's cue that it may send the next one. See routeDdtResponse(). */
+	private _onDdtReady = new vscode.EventEmitter<void>();
+	readonly onDdtReady = this._onDdtReady.event;
+
 	currentPort: string | undefined;
 
 	constructor(private readonly context: vscode.ExtensionContext) {
@@ -99,6 +159,11 @@ export class SerialTerminal {
 	/** "CP/M X.Y" once learned from a Remote CCP session's startup byte, else undefined. */
 	get detectedCpmVersion(): string | undefined {
 		return this.cpmVersion;
+	}
+
+	/** Best-known current CCP drive, tracked from the last "X>" prompt seen - undefined until one's been seen. */
+	get activeDrive(): string | undefined {
+		return this.currentDrive;
 	}
 
 	private traceEnabled(): boolean {
@@ -134,9 +199,6 @@ export class SerialTerminal {
 
 		// Invalidate any stale transfer/link state from an older connection.
 		this.connectionGeneration++;
-		// A different device may be on the other end now - re-probe rather
-		// than trusting the previous connection's answer.
-		this.remoteCcpAvailable = undefined;
 		this.cpmVersion = undefined;
 
 		// Many hobbyist CP/M/Z80 boards use Xon/Xoff software flow control
@@ -194,12 +256,108 @@ export class SerialTerminal {
 		this._onActivity.fire(`Connected to ${resolvedPort}`);
 	}
 
+	/**
+	 * True while the in-flight DDT command (see ddtPending) is guaranteed to
+	 * produce only DDT's own text - false only for 'go'. The launch banner
+	 * and X don't run any target code, so nothing else could be producing
+	 * output; T executes exactly one instruction and always finishes with
+	 * its own register dump - even when that one instruction is a CALL, a
+	 * single step only steps *into* it (pushes the return address, lands on
+	 * the callee's first instruction) rather than running the callee to
+	 * completion, so it can't produce real program output either. Only G
+	 * can run an unbounded amount of the debugged program's own code, so
+	 * only its response is treated as untrusted (the debugged program's own
+	 * until proven otherwise). See routeDdtResponse().
+	 */
+	private isDdtResponseTrusted(): boolean {
+		return this.ddtPending !== 'go';
+	}
+
+	/**
+	 * Emits any content still held in ddtScanBuffer to the main terminal
+	 * before a DDT session's tracking state is cleared - but only if it was
+	 * withheld from an untrusted (T/G) response; a trusted response's bytes
+	 * are already streamed to the DEBUG panel live as they arrive (see
+	 * routeDdtResponse()), so what's left in ddtScanBuffer at that point is
+	 * just pattern-matching bookkeeping, not unshown content. For an
+	 * untrusted response, routeDdtResponse() can legitimately be sitting on up
+	 * to a few characters that still might be the start of a DDT prompt - if
+	 * the session ends before that resolves one way or the other (a real CCP
+	 * prompt shows up instead, or the user manually ends the session), those
+	 * characters were never actually a DDT prompt after all, so they belong
+	 * in the main terminal rather than being silently discarded by
+	 * resetDdtState().
+	 */
+	private flushDdtScanBuffer(): void {
+		if (this.ddtScanBuffer && !this.isDdtResponseTrusted()) {
+			this._onData.fire(this.ddtScanBuffer);
+		}
+	}
+
+	/** Clears all DDT session tracking fields - shared by every place a DDT session ends (CCP prompt reappearing, disconnect, or the manual endDdtSession()). Callers fire onDdtModeChanged/onDdtListingChanged themselves afterward, and should call flushDdtScanBuffer() first if any pending program output should be preserved. */
+	private resetDdtState(): void {
+		this.ddtMode = false;
+		this.ddtPending = undefined;
+		this.ddtScanBuffer = '';
+		this.ddtSeenPrompt = false;
+		this.ddtPendingEcho = '';
+	}
+
+	/**
+	 * Manual escape hatch for ending a DDT session that isn't returning to
+	 * the CCP prompt on its own (see handleSerialData()'s normal
+	 * exit-detection) - sends Ctrl-C in case DDT or the program under it is
+	 * still reading the console, then unconditionally resets ddtMode state
+	 * so the DEBUG panel can be closed without leaving SerialTerminal
+	 * thinking a session it can no longer show output for is still active.
+	 */
+	endDdtSession(): void {
+		if (!this.ddtMode) {
+			return;
+		}
+		this.flushDdtScanBuffer();
+		this.resetDdtState();
+		this._onDdtModeChanged.fire(false);
+		this._onDdtListingChanged.fire(undefined);
+		this._onActivity.fire('DDT session ended (manual)');
+		this.sendData('\x03');
+	}
+
+	/**
+	 * The DEBUG panel's Restart button: sends Ctrl-C (same as
+	 * endDdtSession(), in case DDT or the program under it is stuck or
+	 * still running) and relaunches DDT against the same file+drive as the
+	 * session that's active now, or was last ended - lastDdtLaunch persists
+	 * across a session ending, unlike the rest of the DDT tracking state.
+	 * No-op if DDT has never been launched this connection.
+	 */
+	async restartDdt(): Promise<boolean> {
+		if (!this.lastDdtLaunch) {
+			return false;
+		}
+		if (this.ddtMode) {
+			this.endDdtSession();
+		}
+		const { remoteComName, drive } = this.lastDdtLaunch;
+		return this.launchDdt(remoteComName, drive);
+	}
+
 	disconnect() {
 		if (this.hiddenCommandInProgress) {
 			this.hiddenCommandInProgress = false;
 			this._onBusyChange.fire(false);
 			this._onActivity.fire('Cancelled active serial task');
 		}
+
+		if (this.ddtMode) {
+			this.flushDdtScanBuffer();
+			this.resetDdtState();
+			this._onDdtModeChanged.fire(false);
+			this._onDdtListingChanged.fire(undefined);
+		}
+		// A restart against a now-disconnected (or since-reopened, possibly
+		// different) connection doesn't mean anything.
+		this.lastDdtLaunch = undefined;
 
 		// Invalidate all existing serial links so stale transfer tasks cannot
 		// continue writing into a newly-opened connection.
@@ -231,10 +389,12 @@ export class SerialTerminal {
 	}
 
 	/**
-	 * Sends interactive keystrokes typed by the user at the terminal. Ignored
-	 * while a background command (drive scan, DIR listing, file transfer) has
-	 * exclusive control of the line - CP/M only has one console, so the two
-	 * must never write to it at the same time.
+	 * Sends interactive keystrokes typed by the user at the main terminal.
+	 * Ignored while a background command (drive scan, DIR listing, file
+	 * transfer) has exclusive control of the line - CP/M only has one
+	 * console, so the two must never write to it at the same time. Not used
+	 * for DDT commands - see stepDdt()/goDdt(), the only way those are ever
+	 * sent, so this never needs to guess at what the user typed.
 	 */
 	sendData(data: string) {
 		if (this.hiddenCommandInProgress) {
@@ -260,24 +420,43 @@ export class SerialTerminal {
 	 * typing at the CP/M prompt. `label` is surfaced in the activity log.
 	 */
 	async withExclusiveAccess<T>(label: string, work: () => Promise<T>): Promise<T> {
-		const driveBefore = this.currentDrive;
-		this.hiddenCommandInProgress = true;
-		this._onBusyChange.fire(true);
-		this._onActivity.fire(label);
-		try {
-			return await work();
-		} finally {
-			// Restore the drive the user was on before this background
-			// operation ran, so they land back where they were rather than
-			// wherever the last scan/transfer happened to leave the CCP.
-			if (driveBefore && driveBefore !== this.currentDrive) {
-				await this.selectDrive(driveBefore);
-				this._onActivity.fire(`Restored current drive to ${driveBefore}:`);
+		const run = async (): Promise<T> => {
+			const driveBefore = this.currentDrive;
+			const generation = this.connectionGeneration;
+			this.hiddenCommandInProgress = true;
+			this._onBusyChange.fire(true);
+			this._onActivity.fire(label);
+			try {
+				return await work();
+			} finally {
+				// Restore the drive the user was on before this background
+				// operation ran, so they land back where they were rather
+				// than wherever the last scan/transfer happened to leave
+				// the CCP - but only if the connection `work()` ran against
+				// is still the one that's live. Attempting it against a
+				// connection that's been reset/disconnected (or, worse,
+				// reopened fresh under a new generation in the meantime)
+				// would either throw again - masking whatever error
+				// `work()` actually failed with - or send a leftover
+				// "restore" command into a connection this operation was
+				// never meant to touch.
+				if (driveBefore && driveBefore !== this.currentDrive && generation === this.connectionGeneration) {
+					await this.selectDrive(driveBefore);
+					this._onActivity.fire(`Restored current drive to ${driveBefore}:`);
+				}
+				this.hiddenCommandInProgress = false;
+				this._onBusyChange.fire(false);
+				this._onActivity.fire('Ready');
 			}
-			this.hiddenCommandInProgress = false;
-			this._onBusyChange.fire(false);
-			this._onActivity.fire('Ready');
-		}
+		};
+
+		// Chain onto the tail rather than running immediately, so a call
+		// issued while an earlier one is still in flight waits for it
+		// instead of running concurrently against the same wire - see
+		// exclusiveAccessTail's own comment.
+		const resultPromise = this.exclusiveAccessTail.then(run, run);
+		this.exclusiveAccessTail = resultPromise.then(() => undefined, () => undefined);
+		return resultPromise;
 	}
 
 	/** @deprecated Use connect() */
@@ -294,13 +473,196 @@ export class SerialTerminal {
 		this.lastDataTime = Date.now();
 		this._onRawData.fire({ generation: this.connectionGeneration, data });
 
-		const promptMatches = text.match(/[A-P]>/g);
+		// See promptRegex's comment re: CP/M 3/MP/M's optional user-area digit.
+		const promptMatches = text.match(/[A-P]\d{0,2}>/g);
 		if (promptMatches) {
 			this.currentDrive = promptMatches[promptMatches.length - 1][0];
+			if (this.ddtMode && this.ddtSeenPrompt) {
+				// A normal CCP prompt reappearing (after DDT's own prompt has
+				// genuinely been seen at least once - see ddtSeenPrompt) means
+				// DDT (or the program it ran) has returned control to the CCP -
+				// this chunk is regular (post-DDT) output, handled by the
+				// branch below like any other. Covers both "quit DDT" and a
+				// running program warm-booting straight past DDT to the CCP.
+				this.flushDdtScanBuffer();
+				this.resetDdtState();
+				this._onDdtModeChanged.fire(false);
+				this._onDdtListingChanged.fire(undefined);
+				this._onActivity.fire('DDT session ended');
+			}
 		}
 
 		if (!this.hiddenCommandInProgress) {
+			if (this.ddtMode) {
+				this.routeDdtResponse(text);
+			} else {
+				this._onData.fire(text);
+			}
+		}
+	}
+
+	/**
+	 * Longest suffix of `buffer` that could still grow into a full DDT
+	 * prompt match ("\r\n-" or "*XXXX\r\n-") given more incoming bytes -
+	 * e.g. "\r" or "\r\n", or "*", "*3", "*3F", "*3F0", "*3F09", "*3F09\r",
+	 * "*3F09\r\n". Anything before this suffix can never become part of a
+	 * match no matter what arrives next, so it's safe for routeDdtResponse() to
+	 * flush immediately rather than waiting for the buffer to reach some
+	 * fixed size - which is what let short output (a handful of bytes) sit
+	 * unflushed indefinitely before this existed.
+	 */
+	private static ddtPromptPartialTailLength(buffer: string): number {
+		const isPartialPrefix = (s: string) =>
+			/^\r\n?$/.test(s) || /^\*[0-9A-F]{0,4}\r?\n?$/.test(s);
+		const maxLen = Math.min(buffer.length, 7); // "*XXXX\r\n" - longest possible partial (the 8th char completes a full match, caught separately)
+		for (let len = maxLen; len > 0; len--) {
+			if (isPartialPrefix(buffer.slice(buffer.length - len))) {
+				return len;
+			}
+		}
+		return 0;
+	}
+
+	/**
+	 * Sends one of DDT's own commands and marks its response as in flight -
+	 * the only way anything is ever sent to DDT (see the DDT_MODE note on
+	 * ddtPending: there is no free-typing). `kind` records which command
+	 * this is, so routeDdtResponse() knows both how to treat the response
+	 * (see isDdtResponseTrusted()) and what to do once it's complete.
+	 */
+	private beginDdtCommand(command: string, kind: 'examine' | 'step' | 'go'): void {
+		this.ddtPending = kind;
+		this.ddtScanBuffer = '';
+		this.ddtPendingEcho = command;
+		this.writeRaw(command);
+	}
+
+	/** Sends DDT's `T` (single-step one instruction) command. A no-op if a DDT session isn't active or another command's response hasn't resolved yet - the DEBUG panel already keeps Step/Step Over/Go disabled for that window, this is just the same invariant enforced at the source. */
+	stepDdt(): void {
+		if (!this.ddtMode || this.ddtPending) {
+			return;
+		}
+		this.beginDdtCommand('T\r', 'step');
+	}
+
+	/**
+	 * Sends DDT's `G` (go) command - with both `start` and `breakpoint`
+	 * given, runs from `start` with a breakpoint set at `breakpoint` (what
+	 * the DEBUG panel's Step Over button uses to run a CALL to completion
+	 * instead of stepping into it); with neither, runs unconditionally from
+	 * the current PC (Go). Same no-op guard as stepDdt().
+	 */
+	goDdt(start?: string, breakpoint?: string): void {
+		if (!this.ddtMode || this.ddtPending) {
+			return;
+		}
+		const command = start && breakpoint ? `G${start},${breakpoint}\r` : 'G\r';
+		this.beginDdtCommand(command, 'go');
+	}
+
+	/**
+	 * Routes incoming serial data while a DDT session is active. Every byte
+	 * arriving here is in reply to a command *we* chose (ddtPending is
+	 * always exactly which one - see the DDT_MODE note on that field), so
+	 * there's always a definite answer to "is this still DDT replying to
+	 * the last thing sent, or has something else's output started" -
+	 * isDdtResponseTrusted() (true for the launch banner, X, and T, none of
+	 * which run an unbounded amount of target code, so everything received
+	 * is unambiguously DDT's own and streams to the DEBUG panel live as it
+	 * arrives; false only for G, which can run an arbitrary amount of the
+	 * debugged program's own code and so might produce real, unpredictable
+	 * output, so incoming text defaults to the main terminal and only a
+	 * recognized DDT prompt shape is pulled out for the DEBUG panel - see
+	 * ddtPromptPartialTailLength()).
+	 *
+	 * Either way, once DDT's own prompt shape ("*addr\r\n-" or a bare
+	 * "\r\n-") is found in the accumulated response, it's complete:
+	 * ddtSeenPrompt arms the CCP-prompt exit-detection above, and either
+	 * another command is chased automatically - the launch banner and
+	 * every G stop are followed by an auto-X so the register/listing
+	 * display never goes stale, matching what a breakpoint's terse "*addr"
+	 * notice (or the launch banner, which never reports registers at all)
+	 * leaves out - or, for a T/X response that's already complete in
+	 * itself, the DEBUG panel is told the session is ready for the next
+	 * button press.
+	 *
+	 * If nothing is pending at all (ddtPending undefined - DDT and the
+	 * device should both be idle), there's no in-flight command this could
+	 * be a response to, so it isn't guessed at: it goes straight to the
+	 * main terminal like any other unclassified data.
+	 *
+	 * Before any of that: whatever's still left in ddtPendingEcho - the
+	 * echo of the command we just sent - is consumed first, unconditionally
+	 * trusted regardless of isDdtResponseTrusted() (even a G's echo is 100%
+	 * known, it's not the debugged program's output). Without this, a
+	 * G's own echo - arriving before DDT or the program has said anything
+	 * back - would fall through to the untrusted-by-default handling below
+	 * and land in the main terminal.
+	 */
+	private routeDdtResponse(text: string): void {
+		if (!this.ddtPending) {
 			this._onData.fire(text);
+			return;
+		}
+
+		if (this.ddtPendingEcho) {
+			const consumeLen = Math.min(text.length, this.ddtPendingEcho.length);
+			this._onDebugData.fire(text.slice(0, consumeLen));
+			this.ddtPendingEcho = this.ddtPendingEcho.slice(consumeLen);
+			text = text.slice(consumeLen);
+			if (!text) {
+				return;
+			}
+		}
+
+		const DDT_PROMPT_PATTERN = /(\*[0-9A-F]{4}\r\n-)|(\r\n-)/m;
+		const trusted = this.isDdtResponseTrusted();
+
+		if (trusted) {
+			this._onDebugData.fire(text);
+		}
+		this.ddtScanBuffer += text;
+
+		const match = DDT_PROMPT_PATTERN.exec(this.ddtScanBuffer);
+		if (match) {
+			this.ddtSeenPrompt = true;
+			if (!trusted) {
+				const beforeMatch = this.ddtScanBuffer.slice(0, match.index);
+				const fromMatchOnward = this.ddtScanBuffer.slice(match.index);
+				if (beforeMatch) {
+					this._onData.fire(beforeMatch);
+				}
+				// The matched prompt itself, plus anything already buffered
+				// right after it in this same chunk, is DDT's own output.
+				this._onDebugData.fire(fromMatchOnward);
+			}
+			const completedKind = this.ddtPending;
+			this.ddtScanBuffer = '';
+			this.ddtPending = undefined;
+
+			if (completedKind === 'launch' || completedKind === 'go') {
+				this.beginDdtCommand('X\r', 'examine');
+			} else {
+				this._onDdtReady.fire();
+			}
+			return;
+		}
+
+		if (trusted) {
+			// Nothing to flush anywhere - already streamed above. Just cap
+			// how much of the (already-shown) banner/dump text this keeps
+			// around for pattern-matching purposes.
+			if (this.ddtScanBuffer.length > 8) {
+				this.ddtScanBuffer = this.ddtScanBuffer.slice(-8);
+			}
+			return;
+		}
+
+		const keepLen = SerialTerminal.ddtPromptPartialTailLength(this.ddtScanBuffer);
+		if (this.ddtScanBuffer.length > keepLen) {
+			const flushLen = this.ddtScanBuffer.length - keepLen;
+			this._onData.fire(this.ddtScanBuffer.slice(0, flushLen));
+			this.ddtScanBuffer = this.ddtScanBuffer.slice(flushLen);
 		}
 	}
 
@@ -314,7 +676,7 @@ export class SerialTerminal {
 		return {
 			write: (data: Buffer) => {
 				if (linkGeneration !== this.connectionGeneration) {
-					throw new Error('Connection was reset');
+					throw new ConnectionResetError();
 				}
 				this.writeRaw(data);
 			},
@@ -344,13 +706,20 @@ export class SerialTerminal {
 	/**
 	 * Waits until no new serial data has arrived for `idleMs`, so a multi-line
 	 * response (e.g. DIR output) has time to fully arrive instead of assuming
-	 * it's done after one fixed delay.
+	 * it's done after one fixed delay. Throws ConnectionResetError as soon as
+	 * a disconnect/reset happens mid-wait, instead of polling out the rest of
+	 * `timeoutMs` against a connection that's gone - see the class it throws
+	 * for why that matters.
 	 */
 	private async waitForIdle(idleMs = 300, timeoutMs = 4000): Promise<void> {
+		const generation = this.connectionGeneration;
 		const start = Date.now();
 		this.lastDataTime = Date.now();
 		while (Date.now() - start < timeoutMs) {
 			await new Promise(resolve => setTimeout(resolve, 50));
+			if (generation !== this.connectionGeneration) {
+				throw new ConnectionResetError();
+			}
 			if (Date.now() - this.lastDataTime >= idleMs) {
 				return;
 			}
@@ -365,14 +734,20 @@ export class SerialTerminal {
 	 * mistakes that gap for completion, and moves on while the real prompt is
 	 * still on its way. Waiting for the prompt itself, rather than for
 	 * silence, is the only way to tell "still working" from "actually done".
+	 * Throws ConnectionResetError as soon as a disconnect/reset happens
+	 * mid-wait - see waitForIdle().
 	 */
 	private async waitForPrompt(sinceLength: number, timeoutMs = 5000): Promise<boolean> {
+		const generation = this.connectionGeneration;
 		const deadline = Date.now() + timeoutMs;
 		while (Date.now() < deadline) {
 			if (this.promptRegex.test(this.inputBuffer.slice(sinceLength))) {
 				return true;
 			}
 			await new Promise(resolve => setTimeout(resolve, 50));
+			if (generation !== this.connectionGeneration) {
+				throw new ConnectionResetError();
+			}
 		}
 		return this.promptRegex.test(this.inputBuffer.slice(sinceLength));
 	}
@@ -386,6 +761,17 @@ export class SerialTerminal {
 	 * dismissal keystroke.
 	 */
 	private async selectDrive(drive: string, timeoutMs = 5000): Promise<boolean> {
+		if (this.currentDrive === drive) {
+			// Some CCPs don't reliably re-print a fresh prompt when you
+			// reselect the drive you're already on - reselecting anyway
+			// just burns the full waitForPrompt timeout (seen firsthand:
+			// 5s wasted per redundant check, cascading into further
+			// unnecessary work in callers like ensure*OnDrive that retry
+			// on a false "not found") for no benefit, since we already
+			// know where the CCP is from the last real prompt seen.
+			return true;
+		}
+
 		const start = this.inputBuffer.length;
 		this.writeRaw(`${drive}:\r`);
 		const found = await this.waitForPrompt(start, timeoutMs);
@@ -416,6 +802,11 @@ export class SerialTerminal {
 		vscode.commands.executeCommand('cpmIde.serialTerminal.focus');
 	}
 
+	/** The CP/M program to use for auto transfers, captured once per transfer request rather than re-read when a queued item's turn comes - a later dropdown change can't retroactively alter an already-queued item's protocol. */
+	private getTransferApplication(): string {
+		return vscode.workspace.getConfiguration('cpmIde').get<string>('transferApplication') || 'REMOTCCP.COM';
+	}
+
 	async transferFileToDevice(localFilePath: string, drive: string): Promise<boolean> {
 		if (!this.port?.isOpen) {
 			vscode.window.showErrorMessage('Serial port not connected');
@@ -431,37 +822,22 @@ export class SerialTerminal {
 		// CP/M filenames are uppercase; the CCP doesn't case-fold what we send it.
 		const remoteFileName = fileName.toUpperCase();
 		const fileContent = fs.readFileSync(localFilePath);
+		const app = this.getTransferApplication();
 
 		try {
-			await this.withExclusiveAccess(`Sending ${fileName} to ${drive}:…`, async () => {
-				const viaRemoteCcp = await this.withRemoteCcp(drive, async (client) => {
-					await client.putFile(remoteFileName, fileContent);
-					return true;
-				});
-				if (viaRemoteCcp) {
-					return;
-				}
-
-				// Remote CCP unavailable - fall back to XMODEM.
-				if (!await this.ensureXModemOnDrive(drive)) {
-					throw new Error(
-						`XMODEM.COM not found on drive ${drive}: and no copy available on A: - ` +
-						`install it on the device first`
-					);
-				}
-
-				// ensureXModemOnDrive() leaves `drive` selected as the current drive.
-				// /F skips XMODEM.COM's "Overwrite (Y/N)?" prompt, which would
-				// otherwise hang forever waiting for a keypress we never send.
-				this.writeRaw(`XMODEM ${remoteFileName} /F /R\r`);
-				// Give the CCP a moment to load and launch XMODEM.COM before we send.
-				await new Promise(resolve => setTimeout(resolve, 300));
-				await this.xmodem.send(this.getSerialLink(), fileContent, remoteFileName);
-			});
+			await this.transferQueue.enqueue(fileName, 'send', fileContent.length, (onProgress, isCancelled) =>
+				this.withExclusiveAccess(`Sending ${fileName} to ${drive}: via ${app}…`, () =>
+					this.sendOneFileVia(app, drive, localFilePath, remoteFileName, fileContent, onProgress, isCancelled)
+				)
+			);
 			this._onActivity.fire(`Sent ${fileName}`);
 			vscode.window.showInformationMessage(`File ${fileName} transferred to device`);
 			return true;
 		} catch (error) {
+			if (error instanceof TransferCancelledError || error instanceof ConnectionResetError || !this.port?.isOpen) {
+				this._onActivity.fire(`Cancelled: ${fileName}`);
+				return false;
+			}
 			this._onActivity.fire(`Failed to send ${fileName}`);
 			vscode.window.showErrorMessage(`Transfer failed: ${error}`);
 			return false;
@@ -469,12 +845,80 @@ export class SerialTerminal {
 	}
 
 	/**
-	 * Sends one or more files to `drive` using the Slide protocol (see
-	 * src/slide-ts) instead of XMODEM. Launches SLIDECPM on the device,
-	 * waits for it to respond, then hands off to Slide's own RDY/RDY
-	 * handshake and sliding-window transfer.
+	 * Sends `fileContent` (already read from `localFilePath`) to `drive` as
+	 * `remoteFileName`, using `app` (one of the cpmIde.transferApplication
+	 * values) - existence-checked on `drive` first, no silent fallback to a
+	 * different protocol if that check or the transfer itself fails. Must be
+	 * called from within withExclusiveAccess.
 	 */
-	async sendFilesViaSlide(filePaths: string[], drive: string): Promise<boolean> {
+	private async sendOneFileVia(
+		app: string,
+		drive: string,
+		localFilePath: string,
+		remoteFileName: string,
+		fileContent: Buffer,
+		onProgress: (bytesTransferred: number) => void,
+		isCancelled: () => boolean
+	): Promise<void> {
+		if (app === 'XMODEM.COM') {
+			if (!await this.ensureXModemOnDrive(drive)) {
+				throw new Error(
+					`XMODEM.COM not found on drive ${drive}: and no copy available on A: - install it on the device first`
+				);
+			}
+			// ensureXModemOnDrive() leaves `drive` selected as the current drive.
+			// /F skips XMODEM.COM's "Overwrite (Y/N)?" prompt, which would
+			// otherwise hang forever waiting for a keypress we never send.
+			this.writeRaw(`XMODEM ${remoteFileName} /F /R\r`);
+			// Give the CCP a moment to load and launch XMODEM.COM before we send.
+			await new Promise(resolve => setTimeout(resolve, 300));
+			await this.xmodem.send(this.getSerialLink(), fileContent, remoteFileName, onProgress, isCancelled);
+			return;
+		}
+
+		if (app === 'SLIDECPM.COM') {
+			if (!await this.ensureSlideCpmOnDrive(drive)) {
+				throw new Error(
+					`SLIDECPM.COM not found on drive ${drive}: and no copy available on A: - install it on the device first`
+				);
+			}
+			await this.selectDrive(drive);
+			this.writeRaw('SLIDECPM\r');
+			// Give the CCP a moment to load and launch SLIDECPM.COM, and wait
+			// for whatever it prints in response, before starting Slide's own
+			// RDY/RDY handshake.
+			await this.waitForIdle(300, 3000);
+			const session = new SerialSession(this.getSerialLink());
+			await sendFiles(session, [localFilePath], this.traceEnabled(), onProgress, isCancelled);
+			return;
+		}
+
+		// REMOTCCP.COM (default) - launchRemoteCcp() already checks/bootstraps
+		// REMOTCCP.COM's presence on `drive` internally, so there's no
+		// separate ensure-step needed here.
+		const sent = await this.withRemoteCcp(drive, async (client) => {
+			await client.putFile(remoteFileName, fileContent, onProgress, isCancelled);
+			return true;
+		});
+		if (!sent) {
+			throw new Error(this.remoteCcpDisabled
+				? 'Remote CCP is disabled (see the Disable REMOTCCP toggle) - choose a different transfer application or re-enable it'
+				: `Could not start a Remote CCP session on drive ${drive}:`);
+		}
+	}
+
+	/**
+	 * Sends `filePaths` to `drive` honoring the currently selected transfer
+	 * application. A single file just goes through transferFileToDevice().
+	 * For multiple files, REMOTCCP.COM and SLIDECPM.COM both support one
+	 * session/handshake serving any number of files, so those are batched
+	 * (one launch, one queue row) rather than relaunching per file - that
+	 * relaunch-per-file was a real regression (very slow) from initially
+	 * always looping transferFileToDevice() here. XMODEM.COM has no session
+	 * to share - it's a fresh CP/M program invocation per file by protocol
+	 * design - so it still sends one at a time.
+	 */
+	async sendFilesToDevice(filePaths: string[], drive: string): Promise<boolean> {
 		if (!this.port?.isOpen) {
 			vscode.window.showErrorMessage('Serial port not connected');
 			return false;
@@ -489,32 +933,270 @@ export class SerialTerminal {
 			return false;
 		}
 
-		const label = filePaths.length === 1
-			? `Sending ${path.basename(filePaths[0])} via Slide…`
-			: `Sending ${filePaths.length} files via Slide…`;
+		if (filePaths.length === 1) {
+			return this.transferFileToDevice(filePaths[0], drive);
+		}
+
+		const app = this.getTransferApplication();
+		if (app === 'SLIDECPM.COM') {
+			return this.sendFileBatchViaSlide(filePaths, drive);
+		}
+		if (app === 'REMOTCCP.COM') {
+			return this.sendFileBatchViaRemoteCcp(filePaths, drive);
+		}
+
+		let allOk = true;
+		for (const filePath of filePaths) {
+			if (!await this.transferFileToDevice(filePath, drive)) {
+				allOk = false;
+			}
+		}
+		return allOk;
+	}
+
+	/**
+	 * Sends multiple files to `drive` through one shared Remote CCP session
+	 * (one launch/quit, one queue row with aggregate progress) instead of
+	 * relaunching REMOTCCP.COM per file - it's a resident session that can
+	 * serve any number of FP (put file) requests without restarting.
+	 */
+	private async sendFileBatchViaRemoteCcp(filePaths: string[], drive: string): Promise<boolean> {
+		const queueName = `${filePaths.length} files`;
+		const files = filePaths.map(p => ({
+			name: path.basename(p).toUpperCase(),
+			content: fs.readFileSync(p),
+		}));
+		const totalBytes = files.reduce((sum, f) => sum + f.content.length, 0);
 
 		try {
-			await this.withExclusiveAccess(label, async () => {
-				await this.selectDrive(drive);
-
-				this.writeRaw('SLIDECPM\r');
-				// Give the CCP a moment to load and launch SLIDECPM.COM, and
-				// wait for whatever it prints in response, before starting
-				// Slide's own RDY/RDY handshake.
-				await this.waitForIdle(300, 3000);
-
-				const session = new SerialSession(this.getSerialLink());
-				await sendFiles(session, filePaths, this.traceEnabled());
-			});
-
-			this._onActivity.fire(`Sent ${filePaths.length} file(s) via Slide to ${drive}:`);
-			vscode.window.showInformationMessage(`Slide: sent ${filePaths.length} file(s) to ${drive}:`);
+			await this.transferQueue.enqueue(queueName, 'send', totalBytes, (onProgress, isCancelled) =>
+				this.withExclusiveAccess(`Sending ${queueName} to ${drive}: via REMOTCCP.COM…`, async () => {
+					const sent = await this.withRemoteCcp(drive, async (client) => {
+						let bytesDoneInEarlierFiles = 0;
+						for (const file of files) {
+							await client.putFile(
+								file.name,
+								file.content,
+								(bytesInFile) => onProgress(bytesDoneInEarlierFiles + bytesInFile),
+								isCancelled
+							);
+							bytesDoneInEarlierFiles += file.content.length;
+						}
+						return true;
+					});
+					if (!sent) {
+						throw new Error(this.remoteCcpDisabled
+							? 'Remote CCP is disabled (see the Disable REMOTCCP toggle) - choose a different transfer application or re-enable it'
+							: `Could not start a Remote CCP session on drive ${drive}:`);
+					}
+				})
+			);
+			this._onActivity.fire(`Sent ${filePaths.length} file(s) to ${drive}:`);
+			vscode.window.showInformationMessage(`Sent ${filePaths.length} file(s) to ${drive}:`);
 			return true;
 		} catch (error) {
+			if (error instanceof TransferCancelledError || error instanceof ConnectionResetError || !this.port?.isOpen) {
+				this._onActivity.fire(`Cancelled: ${queueName}`);
+				return false;
+			}
+			this._onActivity.fire('Send failed');
+			vscode.window.showErrorMessage(`Send failed: ${error}`);
+			return false;
+		}
+	}
+
+	/**
+	 * Sends multiple files to `drive` through one shared Slide handshake
+	 * (one launch, one queue row with aggregate progress) - restores the
+	 * batching Slide always had before transfer-application selection was
+	 * introduced, rather than relaunching SLIDECPM.COM per file.
+	 */
+	private async sendFileBatchViaSlide(filePaths: string[], drive: string): Promise<boolean> {
+		const queueName = `${filePaths.length} files`;
+		const totalBytes = filePaths.reduce((sum, p) => {
+			try {
+				return sum + fs.statSync(p).size;
+			} catch (error) {
+				return sum;
+			}
+		}, 0);
+
+		try {
+			await this.transferQueue.enqueue(queueName, 'send', totalBytes, (onProgress, isCancelled) =>
+				this.withExclusiveAccess(`Sending ${queueName} to ${drive}: via SLIDECPM.COM…`, async () => {
+					if (!await this.ensureSlideCpmOnDrive(drive)) {
+						throw new Error(
+							`SLIDECPM.COM not found on drive ${drive}: and no copy available on A: - install it on the device first`
+						);
+					}
+					await this.selectDrive(drive);
+					this.writeRaw('SLIDECPM\r');
+					await this.waitForIdle(300, 3000);
+					const session = new SerialSession(this.getSerialLink());
+					await sendFiles(session, filePaths, this.traceEnabled(), onProgress, isCancelled);
+				})
+			);
+			this._onActivity.fire(`Sent ${filePaths.length} file(s) to ${drive}:`);
+			vscode.window.showInformationMessage(`Sent ${filePaths.length} file(s) to ${drive}:`);
+			return true;
+		} catch (error) {
+			if (error instanceof TransferCancelledError || error instanceof ConnectionResetError || !this.port?.isOpen) {
+				this._onActivity.fire(`Cancelled: ${queueName}`);
+				return false;
+			}
 			this._onActivity.fire('Slide send failed');
 			vscode.window.showErrorMessage(`Slide send failed: ${error}`);
 			return false;
 		}
+	}
+
+	/**
+	 * "Debug Assembly": ensures DDT.COM is on the current drive, sends
+	 * `comFilePath` (a freshly-assembled local .com) to that same drive,
+	 * then launches DDT against it. Use debugRemoteFile() instead for a
+	 * file that's already on the device - no local file, nothing to build
+	 * or transfer.
+	 */
+	async debugAssemblyFile(comFilePath: string): Promise<boolean> {
+		if (!this.port?.isOpen) {
+			vscode.window.showErrorMessage('Serial port not connected');
+			return false;
+		}
+
+		const drive = this.activeDrive;
+		if (!drive) {
+			vscode.window.showErrorMessage(
+				'Current CP/M drive is not known yet - let the terminal settle on a prompt first, then retry'
+			);
+			return false;
+		}
+
+		if (!await this.ensureDdtOnDrive(drive)) {
+			return false;
+		}
+
+		if (!await this.transferFileToDevice(comFilePath, drive)) {
+			return false;
+		}
+
+		this.loadDdtListingFromPath(
+			path.join(path.dirname(comFilePath), path.parse(comFilePath).name + '.lst')
+		);
+		return this.launchDdt(path.basename(comFilePath).toUpperCase(), drive);
+	}
+
+	/**
+	 * Debugs a file already on the device - no build, no transfer, just
+	 * ensures DDT.COM is present (same as debugAssemblyFile) and launches
+	 * DDT directly against `fileName` on `drive`.
+	 */
+	async debugRemoteFile(fileName: string, drive: string): Promise<boolean> {
+		if (!this.port?.isOpen) {
+			vscode.window.showErrorMessage('Serial port not connected');
+			return false;
+		}
+
+		if (!await this.ensureDdtOnDrive(drive)) {
+			return false;
+		}
+
+		this.loadDdtListingForRemoteFile(fileName);
+		return this.launchDdt(fileName.toUpperCase(), drive);
+	}
+
+	/**
+	 * There's no local copy of a remote-only debug target, so the matching
+	 * .lst (if any) is looked up by name in the workspace root instead of
+	 * next to a known local .com path - see loadDdtListingFromPath().
+	 */
+	private loadDdtListingForRemoteFile(fileName: string): void {
+		const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+		if (!workspaceFolder) {
+			this._onDdtListingChanged.fire(undefined);
+			return;
+		}
+		const baseName = path.parse(fileName).name;
+		this.loadDdtListingFromPath(path.join(workspaceFolder.uri.fsPath, baseName + '.lst'));
+	}
+
+	/**
+	 * Loads and parses the .lst matching the file under debug, if one exists
+	 * at `lstPath`, and fires onDdtListingChanged with the result (or
+	 * undefined if there's no listing to show) - the DEBUG panel uses this
+	 * to display source context around the current PC alongside the
+	 * registers. Best-effort: a missing or unparseable listing just means no
+	 * source view, not a failed debug launch.
+	 */
+	private loadDdtListingFromPath(lstPath: string): void {
+		if (!fs.existsSync(lstPath)) {
+			this._onDdtListingChanged.fire(undefined);
+			return;
+		}
+		try {
+			const lines = parseListingFile(fs.readFileSync(lstPath, 'utf8'));
+			this._onActivity.fire(`Loaded listing ${path.basename(lstPath)} (${lines.length} addressed line(s))`);
+			this._onDdtListingChanged.fire(lines);
+		} catch {
+			this._onDdtListingChanged.fire(undefined);
+		}
+	}
+
+	/**
+	 * Confirms DDT.COM is present on `drive`, copying the bundled
+	 * remote/DDT.COM there if missing - not something any device already
+	 * has, unlike REMOTCCP.COM/XMODEM.COM/SLIDECPM.COM which the
+	 * ensure*OnDrive helpers can copy device-to-device via A:.
+	 */
+	private async ensureDdtOnDrive(drive: string): Promise<boolean> {
+		const ddtLocalPath = this.context.asAbsolutePath(path.join('remote', 'DDT.COM'));
+		if (!fs.existsSync(ddtLocalPath)) {
+			vscode.window.showErrorMessage('Bundled DDT.COM not found - reinstall the extension');
+			return false;
+		}
+
+		const hasDdt = await this.withExclusiveAccess(
+			`Checking for DDT.COM on ${drive}:…`,
+			() => this.hasFileOnDrive(drive, 'DDT.COM')
+		);
+		if (hasDdt) {
+			return true;
+		}
+		return this.transferFileToDevice(ddtLocalPath, drive);
+	}
+
+	/**
+	 * Types `DDT <remoteComName>` at the CCP and enters DDT_MODE. DDT is
+	 * interactive - this only launches it and returns; the user drives it
+	 * from there through the DEBUG panel/terminal keystroke path, the same
+	 * as typing any other command. Must be called with `drive` already
+	 * selected as the CCP's current drive (both callers' preceding steps -
+	 * a transfer, or ensureDdtOnDrive's own DIR check - already leave it
+	 * there, so reselecting here would just be a pointless multi-second
+	 * round trip standing between "DDT launched" and control actually
+	 * returning to the user).
+	 */
+	private async launchDdt(remoteComName: string, drive: string): Promise<boolean> {
+		this.lastDdtLaunch = { remoteComName, drive };
+		const command = `DDT ${remoteComName}\r`;
+		await this.withExclusiveAccess(`Launching DDT ${remoteComName}…`, async () => {
+			this.writeRaw(command);
+		});
+
+		this.ddtMode = true;
+		this.ddtSeenPrompt = false;
+		this.ddtScanBuffer = '';
+		this.ddtPendingEcho = command;
+		// The launch banner ends without ever reporting registers - treating
+		// it as a 'launch'-kind response (same as any other DDT command, via
+		// routeDdtResponse()) means the moment it completes, the SAME auto-X
+		// logic used after every G stop fires here too, seeding the DEBUG
+		// panel's register/listing display instead of leaving it blank
+		// until the user's first Step/Go.
+		this.ddtPending = 'launch';
+		this._onDdtModeChanged.fire(true);
+		this._onActivity.fire(`Launched DDT ${remoteComName} on ${drive}: - continue in the DEBUG panel`);
+
+		return true;
 	}
 
 	/**
@@ -566,6 +1248,25 @@ export class SerialTerminal {
 		const copied = await this.hasFileOnDrive(drive, fileName);
 		this._onActivity.fire(copied ? `${fileName} copied to ${drive}:` : `Failed to copy ${fileName} to ${drive}:`);
 		return copied;
+	}
+
+	/**
+	 * Confirms SLIDECPM.COM is present on `drive`, copying it from A: via PIP
+	 * first if it's missing there - mirroring ensureXModemOnDrive's pattern
+	 * (minus XMODEM.CFG's config-copy step, which has no SLIDECPM.COM
+	 * equivalent). Must be called from within withExclusiveAccess.
+	 */
+	private async ensureSlideCpmOnDrive(drive: string): Promise<boolean> {
+		if (await this.hasFileOnDrive(drive, 'SLIDECPM.COM')) {
+			return true;
+		}
+		if (drive === 'A') {
+			return false;
+		}
+		if (!await this.hasFileOnDrive('A', 'SLIDECPM.COM')) {
+			return false;
+		}
+		return await this.copyFileFromA(drive, 'SLIDECPM.COM');
 	}
 
 	/**
@@ -676,18 +1377,20 @@ export class SerialTerminal {
 	}
 
 	/**
-	 * Runs whatever extra step a non-Generic target (cpmIde.target) needs
-	 * right after REMOTCCP.COM has been confirmed installed. Currently only
-	 * MicroBeast needs this: it requires ALWRITE to be run afterward. Must
-	 * be called from within withExclusiveAccess.
+	 * Runs whatever extra step a non-Generic device type (cpmIde.deviceType)
+	 * needs right after REMOTCCP.COM has been confirmed installed. Currently
+	 * only microBeast needs this: it requires ALWRITE to be run afterward,
+	 * gated by cpmIde.autoWrite. Must be called from within
+	 * withExclusiveAccess.
 	 */
 	private async runTargetPostInstallHook(): Promise<void> {
-		const target = vscode.workspace.getConfiguration('cpmIde').get<string>('target') ?? 'Generic';
-		if (target !== 'MicroBeast') {
+		const config = vscode.workspace.getConfiguration('cpmIde');
+		const deviceType = config.get<string>('deviceType') ?? 'Generic';
+		if (deviceType !== 'microBeast' || !(config.get<boolean>('autoWrite') ?? true)) {
 			return;
 		}
 
-		this._onActivity.fire('MicroBeast target - running ALWRITE…');
+		this._onActivity.fire('microBeast device - running ALWRITE…');
 		await this.selectDrive('A');
 		const start = this.inputBuffer.length;
 		this.writeRaw('ALWRITE\r');
@@ -1162,29 +1865,41 @@ export class SerialTerminal {
 		}
 
 		await this.selectDrive(drive);
+		// Constructed - and its onData subscription attached - before the
+		// launch command is even sent, so it's listening from the very
+		// first byte back (the echo itself). An earlier version of this
+		// code sent the command first and only started listening once a
+		// separate wait-for-idle gate saw 300ms of quiet, on the theory
+		// that echo/CRLF chatter needed time to settle before the version
+		// byte could safely be told apart from it. In practice that gate
+		// ran on SerialTerminal's own inputBuffer/lastDataTime tracking,
+		// completely independent of this client's onData - so whenever the
+		// real version byte happened to arrive while that gate was still
+		// mid-wait (well within its 300ms window, e.g. right after a fast
+		// disk load), it was consumed by SerialTerminal's general handling
+		// and never reached this client at all: waitForStartup() below then
+		// waited out its full budget for a byte that had already come and
+		// gone, and this fell back to the legacy CCP-command path even
+		// though Remote CCP was running fine.
+		const client = new RemoteCcpClient(this.getSerialLink());
 		// No ".COM" here - the CCP appends that itself when it searches for
 		// a command, and typing it explicitly makes most CCPs fail to find
 		// the match at all (reported as "REMOTCCP.COM?", CP/M's unknown-
 		// command error) rather than just being harmlessly redundant.
-		this.writeRaw(`${REMOTE_CCP_COMMAND}\r`);
-		// Wait for the echo/CR-LF/load-time chatter to genuinely settle
-		// before listening for the version byte - REMOTCCP.COM prints no
-		// prompt of its own to waitForPrompt() on, and a fixed delay here
-		// races loading the .COM off disk (which, like every other disk
-		// operation on this hardware, can take well over what seems like a
-		// safe guess). Starting to listen too early swallows a leftover
-		// echo/CRLF byte as if it were the version byte, leaving the real
-		// one unconsumed and desyncing every subsequent read by one byte.
-		await this.waitForIdle(300, 5000);
+		const command = `${REMOTE_CCP_COMMAND}\r`;
+		this.writeRaw(command);
 
-		const client = new RemoteCcpClient(this.getSerialLink());
 		try {
-			// Generous budget: waitForStartup() deliberately waits out an
-			// 8s settle window (possibly more than once) to confirm startup
-			// chatter has truly settled, not just grabbing the first byte
-			// it sees - the overall budget needs enough room for several
-			// such windows, not just one.
-			const versionByte = await client.waitForStartup(40000);
+			// Everything before the version byte is entirely predictable:
+			// the console's character-echo of `command` itself (it's
+			// listening from before the command was even sent, so none of
+			// that echo can be missed), plus the CCP's own trailing CR/LF
+			// printed just before the .COM actually starts running. See
+			// waitForStartup() - reading exactly that many bytes needs no
+			// waiting once the version byte, the very next one, is in hand,
+			// unlike guessing from a "quiet" gap that may as well wait
+			// again after every byte just to be sure nothing more is coming.
+			const versionByte = await client.waitForStartup(command.length + 2, 40000);
 			this.recordCpmVersion(versionByte);
 			return client;
 		} catch (error) {
@@ -1206,21 +1921,27 @@ export class SerialTerminal {
 	 * Runs `work` against a live Remote CCP session on `drive`: launches it
 	 * (bootstrapping/propagating REMOTCCP.COM as needed), runs `work`, then
 	 * quits back to the CCP. Returns undefined - instead of throwing - if
-	 * Remote CCP isn't available at all, so callers can fall back to their
-	 * older CCP-command/XMODEM path; a failure partway through `work` itself
-	 * still throws normally. Must be called from within withExclusiveAccess.
+	 * Remote CCP isn't available at all (disabled via the manual toggle, or
+	 * REMOTCCP.COM couldn't be found/installed on `drive`); callers that
+	 * reach this because the user explicitly chose REMOTCCP.COM as their
+	 * transfer application surface that as an error rather than silently
+	 * trying something else. Every call re-checks REMOTCCP.COM's presence
+	 * fresh (no "already known unavailable" caching) - now that transfer
+	 * protocol is an explicit per-transfer choice rather than an implicit
+	 * try-then-fall-back chain, a stale negative from some earlier attempt
+	 * (e.g. while a different protocol was selected) must not keep blocking
+	 * this one; a failure partway through `work` itself still throws
+	 * normally. Must be called from within withExclusiveAccess.
 	 */
 	private async withRemoteCcp<T>(drive: string, work: (client: RemoteCcpClient) => Promise<T>): Promise<T | undefined> {
-		if (this.remoteCcpDisabled || this.remoteCcpAvailable === false) {
+		if (this.remoteCcpDisabled) {
 			return undefined;
 		}
 
 		const client = await this.launchRemoteCcp(drive);
 		if (!client) {
-			this.remoteCcpAvailable = false;
 			return undefined;
 		}
-		this.remoteCcpAvailable = true;
 
 		try {
 			return await work(client);
@@ -1252,7 +1973,14 @@ export class SerialTerminal {
 		await this.selectDrive(drive);
 		const start = this.inputBuffer.length;
 		this.writeRaw(`DIR ${normalizedTarget}\r`);
-		await this.waitForIdle(500, 6000);
+		// A DIR that has to seek can pause mid-listing for longer than a
+		// short idle window - waiting for the prompt itself first (like
+		// selectDrive() does, for the same reason) avoids mistaking that
+		// pause for completion and moving on to the next write while the
+		// device is still busy and not reading its console, which drops
+		// whatever gets typed next.
+		await this.waitForPrompt(start, 8000);
+		await this.waitForIdle(500, 3000);
 		const response = this.inputBuffer.slice(start);
 
 		// Restrict the match to listing-like lines to avoid a false positive
@@ -1267,7 +1995,7 @@ export class SerialTerminal {
 		return listingLinePattern.test(response);
 	}
 
-	async transferFileFromDevice(fileName: string, drive: string): Promise<boolean> {
+	async transferFileFromDevice(fileName: string, drive: string, expectedSizeBytes?: number): Promise<boolean> {
 		if (!this.port?.isOpen) {
 			vscode.window.showErrorMessage('Serial port not connected');
 			return false;
@@ -1276,6 +2004,19 @@ export class SerialTerminal {
 		const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
 		if (!workspaceFolder) {
 			vscode.window.showErrorMessage('Open a workspace folder to receive the file into');
+			return false;
+		}
+
+		const app = this.getTransferApplication();
+		if (app === 'SLIDECPM.COM') {
+			// Slide's receive side (src/slide-ts/recv.ts) only supports
+			// accepting whatever the device decides to push, not requesting
+			// one specific named file the way Remote CCP's FG/XMODEM's /S do
+			// - there's no device-side SLIDECPM.COM protocol support for that
+			// in this codebase.
+			vscode.window.showErrorMessage(
+				'Slide download not yet implemented - choose REMOTCCP.COM or XMODEM.COM as the transfer application to receive files.'
+			);
 			return false;
 		}
 
@@ -1294,45 +2035,187 @@ export class SerialTerminal {
 		}
 
 		try {
-			await this.withExclusiveAccess(`Receiving ${fileName} from device…`, async () => {
-				const viaRemoteCcp = await this.withRemoteCcp(drive, async (client) => {
-					const fileContent = await client.getFile(remoteFileName);
-					fs.writeFileSync(savePath, fileContent);
-					return true;
-				});
-				if (viaRemoteCcp) {
-					return;
-				}
+			await this.transferQueue.enqueue(fileName, 'receive', expectedSizeBytes ?? 0, (onProgress, isCancelled) =>
+				this.withExclusiveAccess(`Receiving ${fileName} from device via ${app}…`, async () => {
+					if (app === 'XMODEM.COM') {
+						if (!await this.ensureXModemOnDrive(drive)) {
+							throw new Error(
+								`XMODEM.COM not found on drive ${drive}: and no copy available on A: - ` +
+								`install it on the device first`
+							);
+						}
 
-				// Remote CCP unavailable - fall back to XMODEM.
-				if (!await this.ensureXModemOnDrive(drive)) {
-					throw new Error(
-						`XMODEM.COM not found on drive ${drive}: and no copy available on A: - ` +
-						`install it on the device first`
-					);
-				}
+						// ensureXModemOnDrive() leaves `drive` selected as the CCP's
+						// current drive.
+						this.writeRaw(`XMODEM ${remoteFileName} /S\r`);
+						// Give the CCP a moment to load and launch XMODEM.COM before
+						// we start the receive handshake.
+						await new Promise(resolve => setTimeout(resolve, 300));
 
-				// ensureXModemOnDrive() leaves `drive` selected as the CCP's
-				// current drive.
-				this.writeRaw(`XMODEM ${remoteFileName} /S\r`);
-				// Give the CCP a moment to load and launch XMODEM.COM before
-				// we start the receive handshake.
-				await new Promise(resolve => setTimeout(resolve, 300));
+						// XModem.receive() already strips the trailing CTRL-Z padding
+						// XMODEM uses to fill out the last block - no further trimming
+						// needed (or correct: this used to search for NUL, the wrong
+						// pad byte, with slice math that could zero out the whole
+						// buffer whenever a stray 0x00 happened to appear near the end).
+						const fileContent = await this.xmodem.receive(this.getSerialLink(), remoteFileName, onProgress, isCancelled);
+						fs.writeFileSync(savePath, fileContent);
+						return;
+					}
 
-				// XModem.receive() already strips the trailing CTRL-Z padding
-				// XMODEM uses to fill out the last block - no further trimming
-				// needed (or correct: this used to search for NUL, the wrong
-				// pad byte, with slice math that could zero out the whole
-				// buffer whenever a stray 0x00 happened to appear near the end).
-				const fileContent = await this.xmodem.receive(this.getSerialLink(), remoteFileName);
-				fs.writeFileSync(savePath, fileContent);
-			});
+					// REMOTCCP.COM (default) - launchRemoteCcp() already
+					// checks/bootstraps REMOTCCP.COM's presence on `drive`.
+					const received = await this.withRemoteCcp(drive, async (client) => {
+						const fileContent = await client.getFile(remoteFileName, onProgress, isCancelled);
+						fs.writeFileSync(savePath, fileContent);
+						return true;
+					});
+					if (!received) {
+						throw new Error(this.remoteCcpDisabled
+							? 'Remote CCP is disabled (see the Disable REMOTCCP toggle) - choose a different transfer application or re-enable it'
+							: `Could not start a Remote CCP session on drive ${drive}:`);
+					}
+				})
+			);
 			this._onActivity.fire(`Received ${fileName}`);
 			vscode.window.showInformationMessage(`File ${fileName} received from device`);
 			return true;
 		} catch (error) {
+			if (error instanceof TransferCancelledError || error instanceof ConnectionResetError || !this.port?.isOpen) {
+				this._onActivity.fire(`Cancelled: ${fileName}`);
+				return false;
+			}
 			this._onActivity.fire(`Failed to receive ${fileName}`);
 			vscode.window.showErrorMessage(`Transfer failed: ${error}`);
+			return false;
+		}
+	}
+
+	/**
+	 * Downloads multiple files, grouped by drive (a multi-select in the
+	 * CP/M Files tree can span drives - each folder there is one drive).
+	 * REMOTCCP.COM shares one session per drive-group (one launch, one queue
+	 * row with aggregate progress) instead of relaunching per file; XMODEM.COM
+	 * and a lone file in a group fall back to transferFileFromDevice() one at
+	 * a time.
+	 */
+	async receiveFilesFromDevice(files: { fileName: string; drive: string; sizeBytes?: number }[]): Promise<boolean> {
+		if (!this.port?.isOpen) {
+			vscode.window.showErrorMessage('Serial port not connected');
+			return false;
+		}
+		if (files.length === 0) {
+			return false;
+		}
+		if (files.length === 1) {
+			return this.transferFileFromDevice(files[0].fileName, files[0].drive, files[0].sizeBytes);
+		}
+
+		const app = this.getTransferApplication();
+		if (app === 'SLIDECPM.COM') {
+			vscode.window.showErrorMessage(
+				'Slide download not yet implemented - choose REMOTCCP.COM or XMODEM.COM as the transfer application to receive files.'
+			);
+			return false;
+		}
+
+		const byDrive = new Map<string, typeof files>();
+		for (const f of files) {
+			const group = byDrive.get(f.drive) ?? [];
+			group.push(f);
+			byDrive.set(f.drive, group);
+		}
+
+		let allOk = true;
+		for (const [drive, group] of byDrive) {
+			if (app === 'REMOTCCP.COM' && group.length > 1) {
+				if (!await this.receiveFileBatchViaRemoteCcp(group, drive)) {
+					allOk = false;
+				}
+				continue;
+			}
+			for (const f of group) {
+				if (!await this.transferFileFromDevice(f.fileName, f.drive, f.sizeBytes)) {
+					allOk = false;
+				}
+			}
+		}
+		return allOk;
+	}
+
+	/**
+	 * Downloads multiple files from `drive` through one shared Remote CCP
+	 * session (one launch/quit, one queue row with aggregate progress)
+	 * instead of relaunching REMOTCCP.COM per file.
+	 */
+	private async receiveFileBatchViaRemoteCcp(
+		files: { fileName: string; drive: string; sizeBytes?: number }[],
+		drive: string
+	): Promise<boolean> {
+		const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+		if (!workspaceFolder) {
+			vscode.window.showErrorMessage('Open a workspace folder to receive files into');
+			return false;
+		}
+
+		// Ask about each overwrite up front, rather than partway through a
+		// shared session.
+		const toFetch: typeof files = [];
+		for (const f of files) {
+			const savePath = path.join(workspaceFolder.uri.fsPath, f.fileName);
+			if (fs.existsSync(savePath)) {
+				const choice = await vscode.window.showWarningMessage(
+					`${f.fileName} already exists in the workspace. Overwrite it?`,
+					{ modal: true },
+					'Overwrite'
+				);
+				if (choice !== 'Overwrite') {
+					continue;
+				}
+			}
+			toFetch.push(f);
+		}
+		if (toFetch.length === 0) {
+			return false;
+		}
+
+		const queueName = `${toFetch.length} files`;
+		const totalBytes = toFetch.reduce((sum, f) => sum + (f.sizeBytes ?? 0), 0);
+
+		try {
+			await this.transferQueue.enqueue(queueName, 'receive', totalBytes, (onProgress, isCancelled) =>
+				this.withExclusiveAccess(`Receiving ${queueName} from ${drive}: via REMOTCCP.COM…`, async () => {
+					const received = await this.withRemoteCcp(drive, async (client) => {
+						let bytesDoneInEarlierFiles = 0;
+						for (const f of toFetch) {
+							const remoteFileName = f.fileName.toUpperCase();
+							const savePath = path.join(workspaceFolder.uri.fsPath, f.fileName);
+							const fileContent = await client.getFile(
+								remoteFileName,
+								(bytesInFile) => onProgress(bytesDoneInEarlierFiles + bytesInFile),
+								isCancelled
+							);
+							fs.writeFileSync(savePath, fileContent);
+							bytesDoneInEarlierFiles += f.sizeBytes ?? fileContent.length;
+						}
+						return true;
+					});
+					if (!received) {
+						throw new Error(this.remoteCcpDisabled
+							? 'Remote CCP is disabled (see the Disable REMOTCCP toggle) - choose a different transfer application or re-enable it'
+							: `Could not start a Remote CCP session on drive ${drive}:`);
+					}
+				})
+			);
+			this._onActivity.fire(`Received ${toFetch.length} file(s) from ${drive}:`);
+			vscode.window.showInformationMessage(`Received ${toFetch.length} file(s) from ${drive}:`);
+			return true;
+		} catch (error) {
+			if (error instanceof TransferCancelledError || error instanceof ConnectionResetError || !this.port?.isOpen) {
+				this._onActivity.fire(`Cancelled: ${queueName}`);
+				return false;
+			}
+			this._onActivity.fire('Receive failed');
+			vscode.window.showErrorMessage(`Receive failed: ${error}`);
 			return false;
 		}
 	}
@@ -1440,7 +2323,15 @@ export class SerialTerminal {
 					this._onActivity.fire(`Found drive ${driveLetter}:`);
 				}
 			} catch (error) {
-				// Skip this drive and keep scanning the rest.
+				// The connection was reset out from under this scan - stop
+				// entirely rather than ploughing through the remaining
+				// drives against a connection that's gone (or, worse, a
+				// freshly-reopened one this scan was never meant to touch).
+				if (error instanceof ConnectionResetError || !this.port?.isOpen) {
+					throw error;
+				}
+				// Any other error just means this one drive doesn't exist
+				// or didn't respond - skip it and keep scanning the rest.
 			}
 		}
 
@@ -1486,13 +2377,13 @@ export class SerialTerminal {
 	 * isn't available, so callers fall back to scanDrives()+getDirListing().
 	 * Must be called from within `withExclusiveAccess`.
 	 */
-	async scanDrivesAndFilesViaRemoteCcp(): Promise<Map<string, string[]> | undefined> {
+	async scanDrivesAndFilesViaRemoteCcp(): Promise<Map<string, RemoteCcpFile[]> | undefined> {
 		if (!this.port?.isOpen) {
 			return undefined;
 		}
 
 		return this.withRemoteCcp('A', async (client) => {
-			const result = new Map<string, string[]>();
+			const result = new Map<string, RemoteCcpFile[]>();
 			this._onActivity.fire('Remote CCP: scanning drives…');
 			const drives = await client.driveList((letter) => {
 				this._onActivity.fire(`Found drive ${letter}:`);
@@ -1502,7 +2393,7 @@ export class SerialTerminal {
 			for (const drive of drives) {
 				await client.setDrive(drive);
 				const files = await client.listFiles();
-				result.set(drive, files.map((f) => f.name));
+				result.set(drive, files);
 				this._onActivity.fire(`${drive}: ${files.length} file(s) found`);
 			}
 
@@ -1515,14 +2406,13 @@ export class SerialTerminal {
 	 * undefined if Remote CCP isn't available, so callers fall back to
 	 * getDirListing(). Must be called from within `withExclusiveAccess`.
 	 */
-	async listFilesViaRemoteCcp(drive: string): Promise<string[] | undefined> {
+	async listFilesViaRemoteCcp(drive: string): Promise<RemoteCcpFile[] | undefined> {
 		if (!this.port?.isOpen) {
 			return undefined;
 		}
 
 		return this.withRemoteCcp(drive, async (client) => {
-			const files = await client.listFiles();
-			return files.map((f) => f.name);
+			return client.listFiles();
 		});
 	}
 

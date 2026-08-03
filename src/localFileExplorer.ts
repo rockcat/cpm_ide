@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
+import { formatFileSize } from './formatFileSize';
 
 export class LocalFileExplorer implements vscode.TreeDataProvider<LocalFileSystemItem> {
 	private _onDidChangeTreeData = new vscode.EventEmitter<LocalFileSystemItem | undefined>();
@@ -30,7 +31,18 @@ export class LocalFileExplorer implements vscode.TreeDataProvider<LocalFileSyste
 		return entries
 			.filter(entry => !entry.name.startsWith('.'))
 			.sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name))
-			.map(entry => new LocalFileSystemItem(path.join(dir, entry.name), entry.isDirectory()));
+			.map(entry => {
+				const fullPath = path.join(dir, entry.name);
+				let sizeBytes: number | undefined;
+				if (!entry.isDirectory()) {
+					try {
+						sizeBytes = fs.statSync(fullPath).size;
+					} catch (error) {
+						// Broken symlink or a race with something deleting it - just omit the size.
+					}
+				}
+				return new LocalFileSystemItem(fullPath, entry.isDirectory(), sizeBytes);
+			});
 	}
 }
 
@@ -38,7 +50,7 @@ const ASM_EXTENSIONS = new Set(['.asm', '.s', '.z80']);
 const C_EXTENSIONS = new Set(['.c']);
 
 export class LocalFileSystemItem extends vscode.TreeItem {
-	constructor(fsPath: string, public readonly isDirectory: boolean) {
+	constructor(fsPath: string, public readonly isDirectory: boolean, sizeBytes?: number) {
 		super(
 			path.basename(fsPath),
 			isDirectory ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None
@@ -61,6 +73,9 @@ export class LocalFileSystemItem extends vscode.TreeItem {
 				title: 'Open File',
 				arguments: [this.resourceUri],
 			};
+			if (sizeBytes !== undefined) {
+				this.description = formatFileSize(sizeBytes);
+			}
 		}
 	}
 }

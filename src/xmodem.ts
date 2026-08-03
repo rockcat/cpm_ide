@@ -1,3 +1,5 @@
+import { TransferCancelledError } from './transferQueue';
+
 /**
  * Minimal read/write contract protocol implementations (XModem, Slide) need
  * from the serial connection. Deliberately not the raw `SerialPort` - reads
@@ -15,6 +17,11 @@ export interface SerialLink {
 	/** Actual baud rate of the underlying connection, if known. */
 	baudRate?(): number;
 }
+
+/** Reports cumulative bytes transferred so far. */
+export type XModemProgressFn = (bytesTransferred: number) => void;
+/** Polled between blocks; returning true aborts the transfer with TransferCancelledError. */
+export type XModemIsCancelledFn = () => boolean;
 
 /**
  * XMODEM protocol implementation for CP/M file transfer
@@ -44,23 +51,40 @@ export class XModem {
 	private static readonly BLOCK_SIZE_1K = 1024;
 	private pendingRx: number[] = [];
 
-	async send(link: SerialLink, data: Buffer, fileName: string): Promise<void> {
+	async send(
+		link: SerialLink,
+		data: Buffer,
+		fileName: string,
+		onProgress?: XModemProgressFn,
+		isCancelled?: XModemIsCancelledFn
+	): Promise<void> {
 		return new Promise((resolve, reject) => {
-			this.doSend(link, data, fileName)
+			this.doSend(link, data, fileName, onProgress, isCancelled)
 				.then(resolve)
 				.catch(reject);
 		});
 	}
 
-	async receive(link: SerialLink, fileName: string): Promise<Buffer> {
+	async receive(
+		link: SerialLink,
+		fileName: string,
+		onProgress?: XModemProgressFn,
+		isCancelled?: XModemIsCancelledFn
+	): Promise<Buffer> {
 		return new Promise((resolve, reject) => {
-			this.doReceive(link, fileName)
+			this.doReceive(link, fileName, onProgress, isCancelled)
 				.then(resolve)
 				.catch(reject);
 		});
 	}
 
-	private async doSend(link: SerialLink, data: Buffer, fileName: string): Promise<void> {
+	private async doSend(
+		link: SerialLink,
+		data: Buffer,
+		fileName: string,
+		onProgress?: XModemProgressFn,
+		isCancelled?: XModemIsCancelledFn
+	): Promise<void> {
 		this.pendingRx = [];
 
 		let blockNum = 1;
@@ -89,6 +113,9 @@ export class XModem {
 		const crcMode = initialByte === XModem.CRC_MODE;
 
 		while (offset < data.length) {
+			if (isCancelled?.()) {
+				throw new TransferCancelledError(fileName);
+			}
 			const blockData = Buffer.alloc(XModem.BLOCK_SIZE);
 			const bytesToRead = Math.min(XModem.BLOCK_SIZE, data.length - offset);
 			data.copy(blockData, 0, offset, offset + bytesToRead);
@@ -125,6 +152,7 @@ export class XModem {
 					acked = true;
 					blockNum++;
 					offset += bytesToRead;
+					onProgress?.(offset);
 				} else if (response === XModem.NAK || response === XModem.CRC_MODE) {
 					retryCount++;
 				} else {
@@ -145,9 +173,15 @@ export class XModem {
 		}
 	}
 
-	private async doReceive(link: SerialLink, fileName: string): Promise<Buffer> {
+	private async doReceive(
+		link: SerialLink,
+		fileName: string,
+		onProgress?: XModemProgressFn,
+		isCancelled?: XModemIsCancelledFn
+	): Promise<Buffer> {
 		this.pendingRx = [];
 		const chunks: Buffer[] = [];
+		let bytesReceived = 0;
 		let blockNum = 1;
 		let retryCount = 0;
 		let firstFrameByte: number | undefined;
@@ -183,6 +217,9 @@ export class XModem {
 		// regular receive loop which will fail with the normal timeout path.
 
 		while (true) {
+			if (isCancelled?.()) {
+				throw new TransferCancelledError(fileName);
+			}
 			const byte = firstFrameByte ?? await this.waitForByte(link, [XModem.SOH, XModem.STX, XModem.EOT], XModem.TIMEOUT);
 			firstFrameByte = undefined;
 
@@ -244,6 +281,8 @@ export class XModem {
 				if (recvBlockNum === expected) {
 					chunks.push(blockData);
 					blockNum++;
+					bytesReceived += blockData.length;
+					onProgress?.(bytesReceived);
 				} else if (recvBlockNum !== previous) {
 					throw new Error(`Unexpected block number ${recvBlockNum} (expected ${expected})`);
 				}
