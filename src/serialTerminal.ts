@@ -578,13 +578,20 @@ export class SerialTerminal {
 	 * Either way, once DDT's own prompt shape ("*addr\r\n-" or a bare
 	 * "\r\n-") is found in the accumulated response, it's complete:
 	 * ddtSeenPrompt arms the CCP-prompt exit-detection above, and either
-	 * another command is chased automatically - the launch banner and
-	 * every G stop are followed by an auto-X so the register/listing
-	 * display never goes stale, matching what a breakpoint's terse "*addr"
-	 * notice (or the launch banner, which never reports registers at all)
-	 * leaves out - or, for a T/X response that's already complete in
-	 * itself, the DEBUG panel is told the session is ready for the next
-	 * button press.
+	 * another command is chased automatically, or the DEBUG panel is told
+	 * the session is ready for the next button press. The launch banner,
+	 * every G stop, AND every T step are all followed by an auto-X - only
+	 * X's own response reliably pairs the true current PC with its
+	 * disassembly. A T's own response reprints the *previous* register/
+	 * disasm state (whatever was already known/displayed before this step)
+	 * and only appends a trailing "*nnnn" - with no disassembly of its own -
+	 * for where execution actually landed; treating that as "good enough"
+	 * left the DEBUG panel's registers/listing, and Step Over's own
+	 * decision of whether the *next* instruction is a CALL, all one step
+	 * stale until whatever ran next happened to correct it - e.g. Step Over
+	 * re-issuing a G at an address DDT had already stepped past, running
+	 * that CALL a second time. Only 'examine' (X) itself is exempt, since
+	 * chasing an X after an X would loop forever.
 	 *
 	 * If nothing is pending at all (ddtPending undefined - DDT and the
 	 * device should both be idle), there's no in-flight command this could
@@ -640,10 +647,10 @@ export class SerialTerminal {
 			this.ddtScanBuffer = '';
 			this.ddtPending = undefined;
 
-			if (completedKind === 'launch' || completedKind === 'go') {
-				this.beginDdtCommand('X\r', 'examine');
-			} else {
+			if (completedKind === 'examine') {
 				this._onDdtReady.fire();
+			} else {
+				this.beginDdtCommand('X\r', 'examine');
 			}
 			return;
 		}
@@ -869,9 +876,22 @@ export class SerialTerminal {
 			// ensureXModemOnDrive() leaves `drive` selected as the current drive.
 			// /F skips XMODEM.COM's "Overwrite (Y/N)?" prompt, which would
 			// otherwise hang forever waiting for a keypress we never send.
-			this.writeRaw(`XMODEM ${remoteFileName} /F /R\r`);
-			// Give the CCP a moment to load and launch XMODEM.COM before we send.
-			await new Promise(resolve => setTimeout(resolve, 300));
+			// /X0 forces the transfer through CON: (the same serial
+			// connection everything else here uses) instead of XMODEM.COM's
+			// default of RDR:/PUN: - on boards where those logical devices
+			// aren't mapped to this same port, the console side (us) can
+			// send all day and the receiver (listening on RDR:) never sees
+			// any of it, aborting almost immediately with "ABORT: Sync
+			// fail" - a device-side device-mapping mismatch, not a timing
+			// issue, and no amount of getting our own timing right fixes it.
+			this.writeRaw(`XMODEM ${remoteFileName} /F /R /X0\r`);
+			// No fixed delay here before starting to listen - XModem.send()'s
+			// own sync wait (waitForIsolatedByte(), a generous 60s budget)
+			// already accounts for however long the CCP takes to load and
+			// launch XMODEM.COM. A delay here instead risks the device's own
+			// sync byte and timeout landing inside the delay window, before
+			// the onData subscription this.getSerialLink() feeds even exists
+			// to catch it.
 			await this.xmodem.send(this.getSerialLink(), fileContent, remoteFileName, onProgress, isCancelled);
 			return;
 		}
@@ -1379,7 +1399,7 @@ export class SerialTerminal {
 	/**
 	 * Runs whatever extra step a non-Generic device type (cpmIde.deviceType)
 	 * needs right after REMOTCCP.COM has been confirmed installed. Currently
-	 * only microBeast needs this: it requires ALWRITE to be run afterward,
+	 * only microBeast needs this: it requires A:WRITE to be run afterward,
 	 * gated by cpmIde.autoWrite. Must be called from within
 	 * withExclusiveAccess.
 	 */
@@ -1393,14 +1413,14 @@ export class SerialTerminal {
 		this._onActivity.fire('microBeast device - running ALWRITE…');
 		await this.selectDrive('A');
 		const start = this.inputBuffer.length;
-		this.writeRaw('ALWRITE\r');
+		this.writeRaw('A:WRITE\r');
 		await this.waitForPrompt(start, 15000);
 		await this.waitForIdle(500, 5000);
 
 		const response = this.inputBuffer.slice(start);
 		this._onActivity.fire(/error/i.test(response)
-			? `ALWRITE reported an error: ${response.trim()}`
-			: 'ALWRITE completed');
+			? `A:WRITE reported an error: ${response.trim()}`
+			: 'A:WRITE completed');
 	}
 
 	/** LOAD.COM and PIP.COM must both already be on A: for the Intel HEX install path. */
@@ -1582,10 +1602,14 @@ export class SerialTerminal {
 		// No /F here (unlike the regular file-transfer path) - this only
 		// ever runs when REMOTCCP.COM is confirmed missing (see
 		// ensureRemoteCcpOnDrive), so there's nothing to overwrite and no
-		// "Overwrite (Y/N)?" prompt to skip.
-		this.writeRaw(`XMODEM ${REMOTE_CCP_FILENAME} /R\r`);
-		// Give the CCP a moment to load and launch XMODEM.COM before we send.
-		await new Promise(resolve => setTimeout(resolve, 300));
+		// "Overwrite (Y/N)?" prompt to skip. /X0 forces CON: instead of
+		// XMODEM.COM's default RDR:/PUN: - see sendOneFileVia()'s XMODEM.COM
+		// branch for why that default causes an instant "Sync fail" on
+		// boards where those aren't mapped to this same serial port.
+		this.writeRaw(`XMODEM ${REMOTE_CCP_FILENAME} /R /X0\r`);
+		// No fixed delay before listening either - same reasoning as
+		// sendOneFileVia(): the device's own sync byte and abort timeout
+		// would otherwise race whenever this side starts listening.
 
 		try {
 			await this.xmodem.send(this.getSerialLink(), fileContent, REMOTE_CCP_FILENAME);
@@ -2046,11 +2070,19 @@ export class SerialTerminal {
 						}
 
 						// ensureXModemOnDrive() leaves `drive` selected as the CCP's
-						// current drive.
-						this.writeRaw(`XMODEM ${remoteFileName} /S\r`);
-						// Give the CCP a moment to load and launch XMODEM.COM before
-						// we start the receive handshake.
-						await new Promise(resolve => setTimeout(resolve, 300));
+						// current drive. /X0 forces CON: instead of XMODEM.COM's
+						// default RDR:/PUN: - see sendOneFileVia()'s XMODEM.COM
+						// branch for why that default causes an instant "Sync
+						// fail" on boards where those aren't mapped to this same
+						// serial port.
+						this.writeRaw(`XMODEM ${remoteFileName} /S /X0\r`);
+						// No fixed delay before starting the receive handshake -
+						// XModem.receive() sends the initial NAK itself, repeatedly,
+						// for up to 60s (see its own comment), which already covers
+						// however long the CCP takes to load and launch XMODEM.COM.
+						// A delay here just means this side isn't sending that NAK
+						// yet while the device-side XMODEM.COM (in send mode) is
+						// already waiting for one and may give up first.
 
 						// XModem.receive() already strips the trailing CTRL-Z padding
 						// XMODEM uses to fill out the last block - no further trimming
@@ -2247,7 +2279,7 @@ export class SerialTerminal {
 	/**
 	 * Sends `localFilePath` over XMODEM without driving the CCP at all - no
 	 * drive select, no XMODEM.COM lookup/copy, no launch command. Assumes the
-	 * user has already started `XMODEM <file> /R` themselves at the CP/M
+	 * user has already started `XMODEM <file> /R /X0` themselves at the CP/M
 	 * console, sidestepping the automated flow's drive-select/launch traffic
 	 * (see transferFileToDevice) for devices where that traffic is unreliable.
 	 */

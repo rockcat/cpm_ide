@@ -77,7 +77,20 @@ import { TerminalEmulation } from './term/emulation/base.js';
     // S=0100 P=0100 MVI  E,48". Scanning every such line (not just the one
     // launchDdt() requests via X) is what keeps the register section
     // updated through single-stepping and breakpoints too.
-    const REGISTER_LINE = /C([01])Z([01])M([01])E([01])I([01])\s+A=([0-9A-F]{2})\s+B=([0-9A-F]{4})\s+D=([0-9A-F]{4})\s+H=([0-9A-F]{4})\s+S=([0-9A-F]{4})\s+P=([0-9A-F]{4})(?:\s+(\S.*))?/;
+    //
+    // Crucially, P= here is NOT always "the current PC": after a T, DDT
+    // reprints the register/disasm state as it was BEFORE that step (i.e.
+    // whatever the previous response already showed) and only appends a
+    // trailing "*nnnn" - with no disassembly of its own - to say where
+    // execution actually landed. E.g. stepping over a 2-byte "MVI E,48" at
+    // 0100 prints "...P=0100 MVI  E,48*0102", not "P=0102". Only X's own
+    // response (never a T's) reliably pairs the true current PC with its
+    // disassembly - that asymmetry is exactly why SerialTerminal chases a
+    // fresh X after every T completes too, not just after a G stop. This
+    // trailing address is captured as its own group (13) so a real PC is
+    // still available for the listing/Step Over even in the brief window
+    // before that auto-X's clean response arrives and corrects reg-disasm.
+    const REGISTER_LINE = /C([01])Z([01])M([01])E([01])I([01])\s+A=([0-9A-F]{2})\s+B=([0-9A-F]{4})\s+D=([0-9A-F]{4})\s+H=([0-9A-F]{4})\s+S=([0-9A-F]{4})\s+P=([0-9A-F]{4})(?:\s+(\S.*?))?(?:\*([0-9A-F]{4}))?\s*$/;
     const MAX_REG_LINE_BUFFER = 200; // a real register line is well under 100 chars
 
     function setFlag(id, value) {
@@ -109,14 +122,17 @@ import { TerminalEmulation } from './term/emulation/base.js';
       $('reg-D').textContent = m[8];
       $('reg-H').textContent = m[9];
       $('reg-S').textContent = m[10];
-      $('reg-P').textContent = m[11];
+      // m[13] (see REGISTER_LINE's comment) is where execution actually is
+      // right now, when present - m[11] alone would be one step stale.
+      const currentPc = m[13] || m[11];
+      $('reg-P').textContent = currentPc;
       setFlag('flag-C', m[1]);
       setFlag('flag-Z', m[2]);
       setFlag('flag-M', m[3]);
       setFlag('flag-E', m[4]);
       setFlag('flag-I', m[5]);
       $('reg-disasm').textContent = m[12] || '';
-      updateListingDisplay(m[11]);
+      updateListingDisplay(currentPc);
     }
 
     /** Blanks the registers/flags/listing/output back to their startup state - see the 'reset' message handler below. */

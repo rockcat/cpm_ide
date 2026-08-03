@@ -33,6 +33,11 @@ export class CpmFileExplorer implements vscode.TreeDataProvider<CpmDriveItem | C
 		// Don't load on init - wait for user to connect via serial terminal
 	}
 
+	/** Drive letters found by the last successful scan/refresh, sorted - empty before the first scan or if none responded. */
+	get detectedDrives(): string[] {
+		return Array.from(this.drives.keys()).sort();
+	}
+
 	async refresh(): Promise<void> {
 		try {
 			await this.loadDrivesAndFiles();

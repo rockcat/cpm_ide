@@ -11,7 +11,7 @@ export const FLOW_CONTROLS = [
   { value: 'rtscts', label: 'RTS/CTS' },
 ];
 export const TERMINAL_SIZES = ['80x25', '64x16', '40x24', '52x24'];
-export const DEVICE_TYPES = ['Generic', 'microBeast', 'z80 MBC', 'PicoCP/M2.2'];
+export const DEVICE_TYPES = ['Generic', 'microBeast', 'Z80 MBC v2', 'Pico CP/M 2.2'];
 
 export const TRANSFER_APPS = ['REMOTCCP.COM', 'SLIDECPM.COM','XMODEM.COM'];
 

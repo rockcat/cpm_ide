@@ -8,22 +8,34 @@ A VS Code extension for CP/M application development with an integrated serial t
 
 ### 🔌 Integrated Serial Terminal
 
-- Configurable serial connection: port, baud rate, data bits, stop bits, parity, and flow control (none/Xon-Xoff/RTS-CTS)
-- Fixed-grid terminal display (80x25, 64x16, 40x24, 52x24) with an adjustable text color and a "Force caps" input mode
-- Automatic detection of CP/M command prompts (`A>`, `B>`, etc.)
+- Configurable serial connection: port, baud rate, data bits, stop bits, parity, and flow control (none/Xon-Xoff/RTS-CTS) - the port dropdown lists available ports in natural sorted order (`COM2` before `COM10`)
+- Fixed-grid terminal display (80x25, 64x16, 40x24, 52x24) with selectable VT52/ANSI/None emulation, an adjustable text color and font, and a "Force caps" input mode
+- Automatic detection of CP/M command prompts, including CP/M 3/MP/M's optional user-area digit (`A>`, `B2>`, `A15>`, etc.)
 - Detects and displays the connected device's CP/M version (e.g. "CP/M 2.2") once it's learned from a Remote CCP session
 - Optional TX/RX hex-dump logging to a dedicated output channel, for diagnosing comms issues
-- Transparent background command execution for device management (drive selects, directory scans, etc. run without cluttering the visible terminal)
+- Transparent background command execution for device management (drive selects, directory scans, etc. run without cluttering the visible terminal) - a "Syncing…" overlay makes it clear when the terminal is busy and typing won't do anything
 - The terminal panel opens in the same editor group as whatever is currently rightmost, instead of always splitting open a new column
+- A connection reset (or disconnect) promptly cancels any in-progress background scan/transfer instead of letting it keep running against a connection that's gone
 
 ### 📁 File Transfer System
 
-- Integrated file explorer (CP/M IDE sidebar) showing remote CP/M drives/files alongside a local workspace file tree
-- **Remote CCP** - a small custom resident program (see below) used as the primary, fastest path for scanning drives/files and for all automatic transfers
-- **XMODEM** - the original transfer protocol, used as an automatic fallback when Remote CCP isn't available, plus dedicated manual send/receive commands
-- **Slide** - a windowed, CRC16, multi-file batch transfer protocol for sending several files to a drive in one go
+- Integrated file explorer (CP/M IDE sidebar) showing remote CP/M drives/files (sorted alphabetically) alongside a local workspace file tree
+- Choose the transfer protocol via the **Transfer Application** setting/dropdown:
+  - **Remote CCP** (default) - a small custom resident program (see below), the fastest path for scanning drives/files and for all automatic transfers
+  - **XMODEM** - the original transfer protocol, plus dedicated manual send/receive commands for diagnosing device-side issues
+  - **Slide** - a windowed, CRC16, multi-file batch transfer protocol for sending several files to a drive in one go
+- Drive/file scanning always tries Remote CCP first and transparently falls back to the slower CCP `DIR`-driven scan if it's unavailable, regardless of which transfer application is selected
 - Automatic `PIP` copy of whichever helper (`REMOTCCP.COM`, `XMODEM.COM`, or `SLIDECPM.COM`) is needed from `A:` to the target drive
-- Target-drive picker before each upload
+- Target-drive picker before each upload - only asks when there's genuinely more than one candidate drive (the last scan's detected drives, or the CCP's current drive as a fallback); skips the prompt entirely when there's just one
+
+### 🐞 Debugging with DDT
+
+![DDT debugging](https://raw.githubusercontent.com/rockcat/cpm_ide/refs/heads/main/screenshots/ddt.png)
+
+- Launches CP/M's native debugger (DDT) against a local `.asm`/`.com` (building and transferring it first) or directly against a `.com` already on the device, via inline icons on the file
+- A dedicated DDT Debug panel - opened automatically, or via its own icon in the CP/M Files view title bar - shows DDT's own output, live registers/flags, and (when a matching `.lst` file is found next to the source) 11 lines of source centered on the current PC, updated after every step
+- Step, Step Over (runs a `CALL` to completion instead of stepping into it), Go, Restart, and End Session buttons drive the session - there's no free-typing into DDT, so the extension always knows exactly which response it's waiting for and keeps the display in sync automatically
+- The debugged program's own output (anything it prints while running) is routed to the regular CP/M Terminal, so a program with its own visual output can still be debugged alongside DDT's prompt/register output in the separate panel
 
 ### 🖥️ Z80 Assembly Support
 
@@ -72,7 +84,12 @@ Configure the extension via VS Code settings:
   "cpmIde.enableSerialTrace": false,
   "cpmIde.forceCapitals": true,
   "cpmIde.textColor": "#cccccc",
+  "cpmIde.fontFamily": "",
   "cpmIde.terminalSize": "80x25",
+  "cpmIde.emulation": "Vt52",
+  "cpmIde.transferApplication": "REMOTCCP.COM",
+  "cpmIde.deviceType": "Generic",
+  "cpmIde.autoWrite": true,
   "cpmIde.assembler": "z80asm",
   "cpmIde.assemblerPath": "",
   "cpmIde.zasmFlags": "-b",
@@ -87,7 +104,12 @@ Configure the extension via VS Code settings:
 | `cpmIde.enableSerialTrace` | Logs every byte sent/received to the "CP/M IDE: Serial Trace" output channel - useful for diagnosing comms issues, noisy otherwise |
 | `cpmIde.forceCapitals` | Converts typed input to uppercase in the terminal |
 | `cpmIde.textColor` | Terminal output text color (also settable via the color picker next to "Force caps") |
+| `cpmIde.fontFamily` | Terminal font override; leave empty to use the editor font |
 | `cpmIde.terminalSize` | Fixed character grid for the terminal display; font size scales to fit it |
+| `cpmIde.emulation` | Terminal escape-sequence handling: `None` (plain teletype), `Vt52` (default), or `ANSI` |
+| `cpmIde.transferApplication` | Which protocol automatic transfers use: `REMOTCCP.COM` (default), `SLIDECPM.COM`, or `XMODEM.COM` |
+| `cpmIde.deviceType` | Selects device-specific behavior after installing Remote CCP; `Generic` by default, with extra handling for a few named boards (e.g. `microBeast`) |
+| `cpmIde.autoWrite` | microBeast-specific: runs its `A:WRITE` step automatically after Remote CCP install |
 
 ### Assembler Configuration
 
@@ -140,8 +162,8 @@ If a `Makefile`/`makefile` is found in the workspace root **and** `cpmIde.makeCo
 Remote CCP (`remote/remotccp.asm`, see `specs/Remote CCP Specification.md`) is a small resident CP/M program that answers short text commands over the same serial line used for interactive typing - selecting drives, listing files, and streaming file contents as hex-encoded blocks with per-block acknowledgement. It's the fastest and most reliable transfer path, used automatically once installed:
 
 - On first use, if `REMOTCCP.COM` isn't found on `A:`, you're asked whether to install it there via `PIP` reading from `RDR:`
-- Once present, it's used to scan drives/files (replacing the slower CCP `DIR`-driven scan) and for all automatic file transfers
-- If it's ever unavailable or the install is declined, the extension transparently falls back to the CCP-command/XMODEM path - no functionality is lost, just some speed
+- Once present, it's used to scan drives/files (replacing the slower CCP `DIR`-driven scan), and for automatic file transfers when `cpmIde.transferApplication` is set to `REMOTCCP.COM` (the default)
+- If it's ever unavailable (or the install is declined) drive/file scanning transparently falls back to the CCP-command path - no functionality is lost, just some speed; a transfer explicitly set to use it instead reports the failure so you can pick a different transfer application
 
 ### Building Projects
 
@@ -149,27 +171,43 @@ Remote CCP (`remote/remotccp.asm`, see `specs/Remote CCP Specification.md`) is a
 2. Run command: "CP/M IDE: Build Project" (or use the inline Assemble/Compile icons on individual files in the Local Files panel)
 3. Output files (`.COM`) are created alongside source files, or via your configured Makefile
 
+### Debugging with DDT
+
+1. Click the debug icon on an `.asm` file in the Local Files panel ("Debug Assembly") - this builds it, transfers the `.COM` to the current drive, and launches DDT; or click the debug icon on a `.COM` file already in the CP/M Files panel ("Debug (DDT, no transfer)") to launch DDT directly against it
+2. The DDT Debug panel opens automatically to the right of the terminal (or open/re-open it any time via its icon in the CP/M Files view title bar)
+3. If a `.lst` file with the same name as the `.com` exists locally (next to the source for a local debug, or in the workspace root for a remote one), it's loaded and the source view stays centered on the current PC as you step
+4. Use the toolbar buttons to drive the session:
+   - **Step** - single-steps one instruction (`T`)
+   - **Step Over** - same as Step, but if the current instruction is a `CALL`, runs it to completion instead of stepping into it
+   - **Go** - runs unconditionally from the current PC (`G`)
+   - **Restart** - sends Ctrl-C and relaunches DDT against the same file, if DDT looks stuck
+   - **End Session** - sends Ctrl-C and closes the panel
+5. Everything DDT itself prints (its prompt, register dumps, disassembly) stays in the Debug panel; anything the program being debugged prints while running goes to the regular CP/M Terminal instead
+
 ## Architecture
 
 ### Core Modules
 
 - **extension.ts** - Main extension entry point, command registration, and connection-status UI
-- **serialTerminal.ts** - Serial port management, terminal integration, and orchestration of the Remote CCP/XMODEM/Slide transfer paths
+- **serialTerminal.ts** - Serial port management, terminal integration, orchestration of the Remote CCP/XMODEM/Slide transfer paths, and the DDT debug session state machine
 - **serialTerminalPanel.ts** - Webview host for the interactive terminal panel
+- **debugPanel.ts** - Webview host for the DDT Debug panel (registers/flags, source listing, Step/Step Over/Go/Restart/End Session)
+- **listingFile.ts** - Parses an assembler `.lst` file into address-to-source-line entries for the DDT Debug panel's listing view
 - **remoteCcp.ts** - Client for the Remote CCP protocol (drive/file listing, get/put)
 - **xmodem.ts** - XMODEM protocol implementation (128-byte checksum variant) and the shared `SerialLink` abstraction used by all transfer protocols
 - **slide-ts/** - Windowed, CRC16, multi-file Slide transfer protocol (`protocol.ts`, `send.ts`, `recv.ts`)
+- **transferQueue.ts** - Queues/serializes background transfers so only one touches the wire at a time, and tracks their progress for the Transfers view
 - **fileExplorer.ts** - Tree view providers for the remote CP/M files and local workspace files
 - **build.ts** - Build system integration for the assembler, compiler, and Makefile-driven builds
 - **remote/remotccp.asm** - The Z80 assembly source for the on-device Remote CCP helper (assembled to `remote/remotccp.com`, bundled with the extension)
-- **media/** - Webview UI for the terminal panel (`terminal.html`/`.js`/`.css`)
+- **media/** - Webview UI for the terminal panel (`terminal.html`/`.js`/`.css`) and the DDT Debug panel (`debug.html`/`.js`/`.css`)
 
 ## File Transfer Protocols
 
-Three transfer paths are available, in order of preference:
+Three transfer protocols are available, selected via `cpmIde.transferApplication` (drive/file scanning always prefers Remote CCP regardless of this setting, falling back to CCP commands only if Remote CCP isn't available):
 
-1. **Remote CCP** - custom command/response protocol purpose-built for this extension; fastest, with explicit ACKs around real disk I/O (drive selects, file creation/writes) instead of guessed delays. Requires `REMOTCCP.COM` on the device (auto-installed on request).
-2. **XMODEM** - standard 128-byte checksum XMODEM, used automatically when Remote CCP is unavailable, and directly via the manual send/receive commands. Requires `XMODEM.COM` on the device (auto-copied from `A:` via `PIP` when needed).
+1. **Remote CCP** (default) - custom command/response protocol purpose-built for this extension; fastest, with explicit ACKs around real disk I/O (drive selects, file creation/writes) instead of guessed delays. Requires `REMOTCCP.COM` on the device (auto-installed on request).
+2. **XMODEM** - standard 128-byte XMODEM; supports CRC-16 blocks when sending to a device that requests them, checksum-only when receiving from one. Also available directly via the manual send/receive commands. Requires `XMODEM.COM` on the device (auto-copied from `A:` via `PIP` when needed).
 3. **Slide** - a sliding-window (4 frames in flight), 1024-byte-frame, CRC16 protocol for sending multiple files in a single batch. Requires `SLIDECPM.COM` on the device.
 
 All directory operations and file transfers are performed transparently, with command output hidden from the interactive terminal unless explicitly requested (e.g. via `cpmIde.enableSerialTrace`).
@@ -184,9 +222,9 @@ All directory operations and file transfers are performed transparently, with co
 
 ## Known Limitations
 
-- XMODEM-CRC variant not yet implemented (checksum-only XMODEM)
+- Receiving a file over XMODEM always uses classic checksum mode; only sending adapts to CRC-16 if the device requests it
 - Remote CCP requires installing a small resident helper on the device; some very constrained BIOS/BDOS builds may behave unexpectedly under its automated disk-select/file-create sequencing
-- No integrated debugger (uses CP/M native debugging tools)
+- Debugging uses CP/M's native DDT rather than a from-scratch debugger, so it's bounded by whatever that specific DDT build supports
 
 ## Development
 
@@ -232,8 +270,8 @@ Contributions welcome! Please follow the coding standards and test before submit
 
 ## Roadmap
 
-- [ ] XMODEM-CRC support
+- [x] Integrated CP/M debugger (DDT)
+- [x] Source-level debugging support (listing view synced to the current PC)
+- [ ] XMODEM-CRC support when receiving from the device
 - [ ] Remote file editing
-- [ ] Integrated CP/M debugger
-- [ ] Source-level debugging support
 - [ ] Project templates

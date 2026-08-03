@@ -1,5 +1,6 @@
 node_modules/
 out/
+packages/
 *.vsix
 .DS_Store
 .idea/

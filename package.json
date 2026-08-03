@@ -3,7 +3,7 @@
   "displayName": "CP/M IDE",
   "icon": "media/icon.png",
   "description": "VS Code extension for CP/M application development with serial terminal and file transfer",
-  "version": "0.2.5",
+  "version": "0.3.1",
   "publisher": "rockcat",
   "engines": {
     "vscode": "^1.80.0"

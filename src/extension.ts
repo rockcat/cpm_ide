@@ -17,7 +17,7 @@ let cpmFilesView: vscode.TreeView<unknown> | undefined;
 
 async function confirmManualSend(fsPath: string): Promise<boolean> {
 	const choice = await vscode.window.showInformationMessage(
-		`Prepare CP/M first: run \"XMODEM <FILE> /R\" in the terminal (or on the device), then click Start Send. ` +
+		`Prepare CP/M first: run \"XMODEM <FILE> /R /X0\" in the terminal (or on the device), then click Start Send. ` +
 		`Sending: ${fsPath}`,
 		{ modal: true },
 		'Start Send'
@@ -27,17 +27,43 @@ async function confirmManualSend(fsPath: string): Promise<boolean> {
 
 const DRIVE_LETTERS = 'ABCDEFGHIJKLMNOP'.split('');
 
+/**
+ * Candidate drives to offer for an upload: the last scan's detected drives
+ * (cpmFileExplorer's cached list - reading it here doesn't put any new
+ * traffic on the wire, unlike an actual scanDrives() probe, which could
+ * land right before an XMODEM handshake and confuse the receiving
+ * XMODEM.COM) if there are any, else just the CCP's current drive, so a
+ * connection with no scan done yet still has something to offer instead of
+ * coming up empty.
+ */
+function candidateTargetDrives(terminal: SerialTerminal): string[] {
+	const detected = cpmFileExplorer?.detectedDrives ?? [];
+	if (detected.length > 0) {
+		return detected;
+	}
+	return terminal.activeDrive ? [terminal.activeDrive] : [];
+}
+
+/**
+ * Resolves the target drive for an upload, asking the user only when
+ * there's genuinely more than one candidate to choose from - see
+ * candidateTargetDrives(). Falls back to offering the full A-P alphabet
+ * only when neither a scan nor a known current drive can narrow it down at
+ * all (e.g. a fresh connection whose CCP hasn't printed a prompt yet).
+ */
 async function pickTargetDrive(terminal: SerialTerminal): Promise<string | undefined> {
 	if (!terminal.isOpen) {
 		vscode.window.showErrorMessage('Serial port not connected');
 		return undefined;
 	}
 
-	// Deliberately doesn't probe the device (scanDrives()) - that scan's own
-	// traffic can land on the wire right before the XMODEM handshake and
-	// confuse the receiving XMODEM.COM. The user already knows which drive
-	// they're targeting, so just ask.
-	const picked = await vscode.window.showQuickPick(DRIVE_LETTERS.map((drive) => ({
+	const candidates = candidateTargetDrives(terminal);
+	if (candidates.length === 1) {
+		return candidates[0];
+	}
+
+	const options = candidates.length > 0 ? candidates : DRIVE_LETTERS;
+	const picked = await vscode.window.showQuickPick(options.map((drive) => ({
 		label: `${drive}:`,
 		description: 'Target drive for upload',
 		value: drive,
@@ -325,7 +351,7 @@ export function activate(context: vscode.ExtensionContext) {
 			}
 
 			const startChoice = await vscode.window.showInformationMessage(
-				`Prepare CP/M first: run \"XMODEM <FILE> /S\" in the terminal (or on the device), then click Start Receive. ` +
+				`Prepare CP/M first: run \"XMODEM <FILE> /S /X0\" in the terminal (or on the device), then click Start Receive. ` +
 				`Destination: ${destination.fsPath}`,
 				{ modal: true },
 				'Start Receive'
