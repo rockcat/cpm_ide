@@ -47,6 +47,25 @@ export class SerialTerminalPanel {
 		return this._panel?.viewColumn;
 	}
 
+	/**
+	 * Reveals this panel and moves keyboard focus into its terminal output
+	 * area - used when a DDT Step Over/Go actually runs the debugged program
+	 * rather than single-stepping it, since that program may do its own
+	 * console I/O (e.g. a "press any key" prompt) the moment it starts
+	 * running, and the DEBUG panel itself has nothing to type into (see its
+	 * class comment - DDT_MODE has no free-typing). No-op if the terminal
+	 * isn't open - DDT can't be running without a connection, and this
+	 * panel is how that connection was made, but it doesn't force the
+	 * terminal back open if the user closed it since.
+	 */
+	focusTerminalInput(): void {
+		if (!this._panel) {
+			return;
+		}
+		this._panel.reveal();
+		this._panel.webview.postMessage({ command: 'focusTerminal' });
+	}
+
 	/** The rightmost currently-open editor group, so the terminal joins it as a tab instead of always splitting open a new column. */
 	private rightmostViewColumn(): vscode.ViewColumn {
 		const groups = vscode.window.tabGroups.all;
@@ -128,12 +147,25 @@ export class SerialTerminalPanel {
 					}
 					break;
 				}
-				case 'setRemoteCcpDisabled':
-					this.serialTerminal.setRemoteCcpDisabled(!!msg.value);
-					break;
 				case 'sendRemoteCcp': {
+					// First, try installing via whatever install path matches
+					// the currently selected transfer application (see
+					// sendRemoteCcpViaSelectedTransferApplication) - only fall
+					// back to the manual PIP-command dialog if that doesn't
+					// apply or doesn't succeed.
+					let installed = false;
+					try {
+						installed = await this.serialTerminal.sendRemoteCcpViaSelectedTransferApplication();
+					} catch (err) {
+						vscode.window.showErrorMessage(`Remote CCP install via the selected transfer application failed: ${err}`);
+					}
+					if (installed) {
+						vscode.window.showInformationMessage('Remote CCP installed.');
+						break;
+					}
+
 					const choice = await vscode.window.showWarningMessage(
-						'Manually drive the Remote CCP (REMOTCCP.COM) install handshake on A:. Use this to retry ' +
+						'Manually drive the Remote CCP (REMOTCCP.COM) install handshake. Use this to retry ' +
 						'after a declined/failed auto-install, or to step through it by hand.',
 						{ modal: true },
 						'Send PIP command',
@@ -154,26 +186,37 @@ export class SerialTerminalPanel {
 					await vscode.workspace.getConfiguration('cpmIde')
 						.update('transferApplication', msg.value, vscode.ConfigurationTarget.Global);
 					break;
+				case 'ready':
+					// The webview's own module script (terminal.js) posts this as
+					// soon as it's loaded and has registered its message
+					// listener - only from this point on can it actually receive
+					// anything sent to it. Sending 'connected'/'init' right after
+					// `webview.html = ...` below instead (as this used to) races
+					// the webview's script fetch/parse/import-graph-resolution:
+					// postMessage doesn't queue for a receiver that isn't
+					// listening yet, so on a slow load - a cold cache, or a busy
+					// machine - those messages could be dropped entirely, which
+					// is what left the dropdowns unpopulated (they're only
+					// filled in once 'init' arrives). Waiting for this handshake
+					// instead guarantees delivery regardless of how long the
+					// webview takes to become ready.
+					if (this.serialTerminal.isOpen && this.serialTerminal.currentPort) {
+						this._panel?.webview.postMessage({
+							command: 'connected',
+							port: this.serialTerminal.currentPort,
+						});
+					}
+					this._panel?.webview.postMessage({
+						command: 'init',
+						settings: this.getCurrentSettings(),
+					});
+					break;
 				default:
 					console.warn('Unknown message command:', msg.command);
 			}
 		}, null, this._disposables);
 
 		this._panel.webview.html = this.getHtml(this._panel.webview, mediaRoot);
-
-		// Restore connected state if already open
-		if (this.serialTerminal.isOpen && this.serialTerminal.currentPort) {
-			this._panel.webview.postMessage({
-				command: 'connected',
-				port: this.serialTerminal.currentPort,
-			});
-		}
-
-		this._panel.webview.postMessage({
-			command: 'init',
-			settings: this.getCurrentSettings(),
-			remoteCcpDisabled: this.serialTerminal.isRemoteCcpDisabled,
-		});
 
 		this._disposables.push(
 			this.serialTerminal.onData(text => {

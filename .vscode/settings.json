@@ -4,9 +4,9 @@
   "cpmIde.dataBits": 8,
   "cpmIde.stopBits": 1,
   "cpmIde.parity": "none",
-  "cpmIde.assembler": "z80asm",
+  "cpmIde.assembler": "zasm",
   "cpmIde.assemblerPath": "",
-  "cpmIde.zasmFlags": "-b",
+  "cpmIde.zasmFlags": "-uwy",
   "cpmIde.compiler": "cc",
   "cpmIde.compilerPath": "",
   "cpmIde.sdccTarget": "z80",
@@ -14,5 +14,6 @@
   "[asm-z80]": {
     "editor.tabSize": 4,
     "editor.insertSpaces": true
-  }
+  },
+  "cpmIde.makeCommand": "nmake"
 }

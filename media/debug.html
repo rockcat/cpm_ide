@@ -11,42 +11,46 @@
 <div id="debug-toolbar">
   <button id="btn-step" title="Step: single-step one instruction (T)" disabled><span class="codicon codicon-debug-step-into"></span></button>
   <button id="btn-step-over" title="Step Over: steps, but runs a CALL to completion instead of stepping into it" disabled><span class="codicon codicon-debug-step-over"></span></button>
-  <button id="btn-go" title="Go: run from the current PC with no breakpoint (G)" disabled><span class="codicon codicon-debug-start"></span></button>
+  <button id="btn-go" title="Go: run from the current PC (G), stopping at any breakpoints set below" disabled><span class="codicon codicon-debug-start"></span></button>
   <button id="btn-restart" title="Restart: sends Ctrl-C, then relaunches DDT against the same file"><span class="codicon codicon-debug-restart"></span></button>
-  <button id="btn-end-session" title="End Session: sends Ctrl-C and closes this panel"><span class="codicon codicon-debug-stop"></span></button>
+  <button id="btn-end-session" title="End Session: sends Ctrl-C and ends the DDT session, leaving this panel open to review"><span class="codicon codicon-debug-stop"></span></button>
 </div>
 <div id="output" tabindex="0"></div>
-<div id="registers">
-  <div class="reg-row">
-    <span class="reg-label">A</span><span id="reg-A" class="reg-val">--</span>
-    <span class="reg-label">B</span><span id="reg-B" class="reg-val">----</span>
-    <span class="reg-label">D</span><span id="reg-D" class="reg-val">----</span>
-    <span class="reg-label">H</span><span id="reg-H" class="reg-val">----</span>
-    <span class="reg-label">S</span><span id="reg-S" class="reg-val">----</span>
-    <span class="reg-label">P</span><span id="reg-P" class="reg-val">----</span>
+<div id="status">
+  <div id="reg-block">
+    <div id="registers">
+      <div class="reg-row">
+        <span class="reg-label">A</span><span id="reg-A" class="reg-val">--</span>
+        <span class="reg-label">B</span><span id="reg-B" class="reg-val">----</span>
+        <span class="reg-label">D</span><span id="reg-D" class="reg-val">----</span>
+        <span class="reg-label">H</span><span id="reg-H" class="reg-val">----</span>
+        <span class="reg-label">S</span><span id="reg-S" class="reg-val">----</span>
+        <span class="reg-label">P</span><span id="reg-P" class="reg-val">----</span>
+      </div>
+      <div class="reg-row">
+        <span class="reg-label">C</span><span id="flag-C" class="reg-val flag">-</span>
+        <span class="reg-label">Z</span><span id="flag-Z" class="reg-val flag">-</span>
+        <span class="reg-label">M</span><span id="flag-M" class="reg-val flag">-</span>
+        <span class="reg-label">E</span><span id="flag-E" class="reg-val flag">-</span>
+        <span class="reg-label">I</span><span id="flag-I" class="reg-val flag">-</span>
+        <span id="reg-disasm" class="reg-disasm"></span>
+      </div>
+    </div>
   </div>
-  <div class="reg-row">
-    <span class="reg-label">C</span><span id="flag-C" class="reg-val flag">-</span>
-    <span class="reg-label">Z</span><span id="flag-Z" class="reg-val flag">-</span>
-    <span class="reg-label">M</span><span id="flag-M" class="reg-val flag">-</span>
-    <span class="reg-label">E</span><span id="flag-E" class="reg-val flag">-</span>
-    <span class="reg-label">I</span><span id="flag-I" class="reg-val flag">-</span>
-    <span id="reg-disasm" class="reg-disasm"></span>
+  <div id="breakpoints">
+    <div class="brk-row">
+      <div class="breakpoint-label">Brk 1</div>
+      <div id="breakpoint-1" class="breakpoint-val">--</div>
+      <button id="breakpoint-1-clear" class="breakpoint-clear" title="Clear breakpoint 1" disabled><span class="codicon codicon-close"></span></button>
+    </div>
+    <div class="brk-row">
+      <div class="breakpoint-label">Brk 2</div>
+      <div id="breakpoint-2" class="breakpoint-val">--</div>
+      <button id="breakpoint-2-clear" class="breakpoint-clear" title="Clear breakpoint 2" disabled><span class="codicon codicon-close"></span></button>
+    </div>
   </div>
 </div>
-<div id="listing" hidden>
-  <div class="listing-line"></div>
-  <div class="listing-line"></div>
-  <div class="listing-line"></div>
-  <div class="listing-line"></div>
-  <div class="listing-line"></div>
-  <div class="listing-line current"></div>
-  <div class="listing-line"></div>
-  <div class="listing-line"></div>
-  <div class="listing-line"></div>
-  <div class="listing-line"></div>
-  <div class="listing-line"></div>
-</div>
+<div id="listing" hidden></div>
 <script type="module" src="{{scriptUri}}"></script>
 </body>
 </html>

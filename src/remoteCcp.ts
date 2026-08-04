@@ -191,6 +191,19 @@ export class RemoteCcpClient {
 		}
 	}
 
+	/** Drives BDOS reports as read-only (BDOS 29 DRV_ROVEC), same wire shape as driveList(). */
+	async readOnlyDriveList(): Promise<string[]> {
+		this.writeLine('DR');
+		const drives: string[] = [];
+		while (true) {
+			const byte = await this.readByte();
+			if (byte === EOT) {
+				return drives;
+			}
+			drives.push(String.fromCharCode(byte));
+		}
+	}
+
 	/**
 	 * Lists files on the current drive. Like the CCP's own DIR, a file
 	 * spanning multiple extents appears once per extent - matching

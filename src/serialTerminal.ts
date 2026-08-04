@@ -16,6 +16,8 @@ const REMOTE_CCP_FILENAME = 'REMOTCCP.COM';
 /** Command typed at the CCP to launch it - no ".COM": the CCP appends that itself when searching for a command. */
 const REMOTE_CCP_COMMAND = 'REMOTCCP';
 
+const getDeviceType = () => vscode.workspace.getConfiguration('cpmIde').get<string>('deviceType') ?? 'Generic';
+
 export class SerialTerminal {
 	readonly transferQueue = new TransferQueue();
 	private port: SerialPort | undefined;
@@ -82,15 +84,6 @@ export class SerialTerminal {
 	private ddtSeenPrompt = false;
 	/** What launchDdt() was last called with - kept across a session ending (deliberately not cleared by resetDdtState()) so restartDdt() can relaunch the same target without the caller needing to remember it. */
 	private lastDdtLaunch: { remoteComName: string; drive: string } | undefined;
-	/**
-	 * Manual user override that blocks Remote CCP from being launched or
-	 * installed by the automatic drive-scan/file-listing/transfer paths.
-	 * A deliberate choice, so it does NOT reset on reconnect - it stays off
-	 * until the user turns it back on. The manual "Send REMOTCCP" actions
-	 * bypass this flag entirely, since triggering them IS the user asking
-	 * for Remote CCP traffic despite the toggle.
-	 */
-	private remoteCcpDisabled = false;
 	/** "CP/M X.Y", learned from Remote CCP's startup version byte - undefined until first learned, reset on reconnect. */
 	private cpmVersion: string | undefined;
 
@@ -143,17 +136,6 @@ export class SerialTerminal {
 
 	get isOpen(): boolean {
 		return this.port?.isOpen ?? false;
-	}
-
-	get isRemoteCcpDisabled(): boolean {
-		return this.remoteCcpDisabled;
-	}
-
-	setRemoteCcpDisabled(disabled: boolean): void {
-		this.remoteCcpDisabled = disabled;
-		this._onActivity.fire(disabled
-			? 'Remote CCP disabled - falling back to legacy CCP-command path'
-			: 'Remote CCP re-enabled');
 	}
 
 	/** "CP/M X.Y" once learned from a Remote CCP session's startup byte, else undefined. */
@@ -308,8 +290,11 @@ export class SerialTerminal {
 	 * the CCP prompt on its own (see handleSerialData()'s normal
 	 * exit-detection) - sends Ctrl-C in case DDT or the program under it is
 	 * still reading the console, then unconditionally resets ddtMode state
-	 * so the DEBUG panel can be closed without leaving SerialTerminal
-	 * thinking a session it can no longer show output for is still active.
+	 * so SerialTerminal doesn't keep thinking a session it can no longer
+	 * show output for is still active. Deliberately leaves the DEBUG panel's
+	 * listing/registers/output alone (no onDdtListingChanged fire here) -
+	 * the panel stays open showing the session's final state so the user
+	 * can review what happened.
 	 */
 	endDdtSession(): void {
 		if (!this.ddtMode) {
@@ -318,7 +303,6 @@ export class SerialTerminal {
 		this.flushDdtScanBuffer();
 		this.resetDdtState();
 		this._onDdtModeChanged.fire(false);
-		this._onDdtListingChanged.fire(undefined);
 		this._onActivity.fire('DDT session ended (manual)');
 		this.sendData('\x03');
 	}
@@ -353,11 +337,23 @@ export class SerialTerminal {
 			this.flushDdtScanBuffer();
 			this.resetDdtState();
 			this._onDdtModeChanged.fire(false);
-			this._onDdtListingChanged.fire(undefined);
+			// Leaves the DEBUG panel's listing/registers/output as they were -
+			// see endDdtSession()'s comment on why that's left in place for
+			// the user to review, which applies here too.
 		}
 		// A restart against a now-disconnected (or since-reopened, possibly
 		// different) connection doesn't mean anything.
 		this.lastDdtLaunch = undefined;
+
+		// The "last known drive" doesn't survive a disconnect either - it's
+		// meaningless for whatever connects next (a different port, a
+		// power-cycled device defaulting back to A:, etc.), and leaving it
+		// set is actively dangerous: selectDrive() treats a matching
+		// currentDrive as "already there, nothing to send", so a stale value
+		// could make it silently skip the real select on the new connection,
+		// leaving operations writing to whatever drive the device actually
+		// booted to instead of the one the software thinks is current.
+		this.currentDrive = undefined;
 
 		// Invalidate all existing serial links so stale transfer tasks cannot
 		// continue writing into a newly-opened connection.
@@ -410,6 +406,26 @@ export class SerialTerminal {
 				this.log.appendLine(`[${new Date().toISOString()}] TX ${formatHexDump(buffer)}`);
 			}
 			this.port.write(data);
+		}
+	}
+
+	/**
+	 * Writes `data` one byte at a time, pausing `charDelayMs` after each -
+	 * or the longer `lineDelayMs` instead whenever that byte is a line
+	 * terminator ('\r' or '\n') - rather than writeRaw()'s single unbroken
+	 * write. Gives a receiver that needs to actually process/buffer each
+	 * line (e.g. PIP reading a raw binary stream from CON:/RDR: on a slow
+	 * BIOS) enough time to keep up, at the cost of a much slower transfer.
+	 * Used by streamRemoteCcpFileRaw() - the byte-pacing raw-PIP install
+	 * path is already the least reliable of Remote CCP's install methods
+	 * (see bootstrapRemoteCcp), so trading speed for a better shot at
+	 * landing intact is the right tradeoff there specifically.
+	 */
+	private async writeRawPaced(data: Buffer, charDelayMs = 3, lineDelayMs = 50): Promise<void> {
+		for (const byte of data) {
+			this.writeRaw(Buffer.from([byte]));
+			const isLineEnd = byte === 0x0d || byte === 0x0a;
+			await new Promise(resolve => setTimeout(resolve, isLineEnd ? lineDelayMs : charDelayMs));
 		}
 	}
 
@@ -487,7 +503,9 @@ export class SerialTerminal {
 				this.flushDdtScanBuffer();
 				this.resetDdtState();
 				this._onDdtModeChanged.fire(false);
-				this._onDdtListingChanged.fire(undefined);
+				// Leaves the DEBUG panel's listing/registers/output as they were -
+				// see endDdtSession()'s comment on why that's left in place for
+				// the user to review, which applies here too.
 				this._onActivity.fire('DDT session ended');
 			}
 		}
@@ -546,17 +564,21 @@ export class SerialTerminal {
 	}
 
 	/**
-	 * Sends DDT's `G` (go) command - with both `start` and `breakpoint`
-	 * given, runs from `start` with a breakpoint set at `breakpoint` (what
-	 * the DEBUG panel's Step Over button uses to run a CALL to completion
-	 * instead of stepping into it); with neither, runs unconditionally from
-	 * the current PC (Go). Same no-op guard as stepDdt().
+	 * Sends DDT's `G` (go) command - runs from the current PC, stopping at
+	 * whichever of `bp1`/`bp2` are given, using DDT's own `G,bp1,bp2`
+	 * breakpoint syntax (either, both, or neither may be given - a bare `G`
+	 * runs unconditionally). Used both for the DEBUG panel's own Go button
+	 * (which passes its two user-set breakpoints) and Step Over (which
+	 * passes the address right after a CALL as bp1, to run it to completion
+	 * instead of stepping into it - see debug.js's btn-step-over handler).
+	 * Same no-op guard as stepDdt().
 	 */
-	goDdt(start?: string, breakpoint?: string): void {
+	goDdt(bp1?: string, bp2?: string): void {
 		if (!this.ddtMode || this.ddtPending) {
 			return;
 		}
-		const command = start && breakpoint ? `G${start},${breakpoint}\r` : 'G\r';
+		const breakpoints = [bp1, bp2].filter((bp): bp is string => !!bp);
+		const command = (breakpoints.length ? `G,${breakpoints.join(',')}` : 'G') + '\r';
 		this.beginDdtCommand(command, 'go');
 	}
 
@@ -617,6 +639,27 @@ export class SerialTerminal {
 			this._onDebugData.fire(text.slice(0, consumeLen));
 			this.ddtPendingEcho = this.ddtPendingEcho.slice(consumeLen);
 			text = text.slice(consumeLen);
+
+			// DDT prints its own "\r\n" immediately once it's read the command
+			// line back (the same convention the CCP itself uses before
+			// running a program), right after the character-echo of our sent
+			// command - not something we sent ourselves, but still preamble
+			// rather than real content. Left unconsumed, this fell through to
+			// the trusted/untrusted classification below same as anything
+			// else: for a trusted response (T/X/launch) that's harmless
+			// (everything goes to the DEBUG panel regardless), but for an
+			// untrusted one (G) it was wrongly counted as part of "whatever
+			// the debugged program printed before DDT's prompt reappeared" -
+			// e.g. text like "04,0107\r\r\nH*0107\r\n-" (echo of "04,0107\r"
+			// followed by DDT's own "\r\n", then the program's real "H",
+			// then DDT's stop prompt) left a stray "\r\n" glued onto the
+			// front of "H" in the main terminal, showing up as a spurious
+			// blank line ahead of every character the program printed.
+			if (!this.ddtPendingEcho && text.startsWith('\r\n')) {
+				this._onDebugData.fire('\r\n');
+				text = text.slice(2);
+			}
+
 			if (!text) {
 				return;
 			}
@@ -896,15 +939,29 @@ export class SerialTerminal {
 			return;
 		}
 
-		if (app === 'SLIDECPM.COM') {
-			if (!await this.ensureSlideCpmOnDrive(drive)) {
-				throw new Error(
-					`SLIDECPM.COM not found on drive ${drive}: and no copy available on A: - install it on the device first`
+		if (app === 'SLIDECPM.COM' || app === 'SLIDE.COM') {
+			if (app === 'SLIDE.COM') {
+				const reason = this.slideComUnavailableReason();
+				if (reason) {
+					throw new Error(reason);
+				}
+			}
+			const ready = app === 'SLIDE.COM'
+				? await this.ensureSlideComOnDrive()
+				: await this.ensureSlideCpmOnDrive(drive);
+			if (!ready) {
+				throw new Error(app === 'SLIDE.COM'
+					? `SLIDE.COM not found on A: - it must already be installed on the device`
+					: `SLIDECPM.COM not found on drive ${drive}: and no copy available on A: - install it on the device first`
 				);
 			}
+			// SLIDE.COM only ever runs from A: on microBeast - launched via an
+			// explicit "A:SLIDE" so the CCP finds it there regardless of which
+			// drive is current, while `drive` stays selected as current so the
+			// files it receives land on the actual target drive.
 			await this.selectDrive(drive);
-			this.writeRaw('SLIDECPM\r');
-			// Give the CCP a moment to load and launch SLIDECPM.COM, and wait
+			this.writeRaw(`${app === 'SLIDE.COM' ? 'A:SLIDE' : 'SLIDECPM'}\r`);
+			// Give the CCP a moment to load and launch SLIDE(CPM).COM, and wait
 			// for whatever it prints in response, before starting Slide's own
 			// RDY/RDY handshake.
 			await this.waitForIdle(300, 3000);
@@ -921,9 +978,7 @@ export class SerialTerminal {
 			return true;
 		});
 		if (!sent) {
-			throw new Error(this.remoteCcpDisabled
-				? 'Remote CCP is disabled (see the Disable REMOTCCP toggle) - choose a different transfer application or re-enable it'
-				: `Could not start a Remote CCP session on drive ${drive}:`);
+			throw new Error(`Could not start a Remote CCP session on drive ${drive}:`);
 		}
 	}
 
@@ -958,8 +1013,8 @@ export class SerialTerminal {
 		}
 
 		const app = this.getTransferApplication();
-		if (app === 'SLIDECPM.COM') {
-			return this.sendFileBatchViaSlide(filePaths, drive);
+		if (app === 'SLIDECPM.COM' || app === 'SLIDE.COM') {
+			return this.sendFileBatchViaSlide(app, filePaths, drive);
 		}
 		if (app === 'REMOTCCP.COM') {
 			return this.sendFileBatchViaRemoteCcp(filePaths, drive);
@@ -1005,9 +1060,7 @@ export class SerialTerminal {
 						return true;
 					});
 					if (!sent) {
-						throw new Error(this.remoteCcpDisabled
-							? 'Remote CCP is disabled (see the Disable REMOTCCP toggle) - choose a different transfer application or re-enable it'
-							: `Could not start a Remote CCP session on drive ${drive}:`);
+						throw new Error(`Could not start a Remote CCP session on drive ${drive}:`);
 					}
 				})
 			);
@@ -1029,9 +1082,11 @@ export class SerialTerminal {
 	 * Sends multiple files to `drive` through one shared Slide handshake
 	 * (one launch, one queue row with aggregate progress) - restores the
 	 * batching Slide always had before transfer-application selection was
-	 * introduced, rather than relaunching SLIDECPM.COM per file.
+	 * introduced, rather than relaunching SLIDE(CPM).COM per file. `app` is
+	 * 'SLIDECPM.COM' or 'SLIDE.COM' - see sendOneFileVia's matching branch for
+	 * how the two differ (install support, device/baud restrictions).
 	 */
-	private async sendFileBatchViaSlide(filePaths: string[], drive: string): Promise<boolean> {
+	private async sendFileBatchViaSlide(app: string, filePaths: string[], drive: string): Promise<boolean> {
 		const queueName = `${filePaths.length} files`;
 		const totalBytes = filePaths.reduce((sum, p) => {
 			try {
@@ -1043,14 +1098,29 @@ export class SerialTerminal {
 
 		try {
 			await this.transferQueue.enqueue(queueName, 'send', totalBytes, (onProgress, isCancelled) =>
-				this.withExclusiveAccess(`Sending ${queueName} to ${drive}: via SLIDECPM.COM…`, async () => {
-					if (!await this.ensureSlideCpmOnDrive(drive)) {
-						throw new Error(
-							`SLIDECPM.COM not found on drive ${drive}: and no copy available on A: - install it on the device first`
+				this.withExclusiveAccess(`Sending ${queueName} to ${drive}: via ${app}…`, async () => {
+					if (app === 'SLIDE.COM') {
+						const reason = this.slideComUnavailableReason();
+						if (reason) {
+							throw new Error(reason);
+						}
+					}
+					const ready = app === 'SLIDE.COM'
+						? await this.ensureSlideComOnDrive()
+						: await this.ensureSlideCpmOnDrive(drive);
+					if (!ready) {
+						throw new Error(app === 'SLIDE.COM'
+							? `SLIDE.COM not found on A: - it must already be installed on the device`
+							: `SLIDECPM.COM not found on drive ${drive}: and no copy available on A: - install it on the device first`
 						);
 					}
+					// SLIDE.COM only ever runs from A: on microBeast - launched
+					// via an explicit "A:SLIDE" so the CCP finds it there
+					// regardless of which drive is current, while `drive` stays
+					// selected as current so the files it receives land on the
+					// actual target drive.
 					await this.selectDrive(drive);
-					this.writeRaw('SLIDECPM\r');
+					this.writeRaw(`${app === 'SLIDE.COM' ? 'A:SLIDE' : 'SLIDECPM'}\r`);
 					await this.waitForIdle(300, 3000);
 					const session = new SerialSession(this.getSerialLink());
 					await sendFiles(session, filePaths, this.traceEnabled(), onProgress, isCancelled);
@@ -1237,7 +1307,7 @@ export class SerialTerminal {
 				if (!await this.hasFileOnDrive('A', 'XMODEM.COM')) {
 					return false;
 				}
-				comReady = await this.copyFileFromA(drive, 'XMODEM.COM');
+				comReady = await this.copyFileFromA('A', drive, 'XMODEM.COM');
 				if (!comReady) {
 					return false;
 				}
@@ -1254,15 +1324,15 @@ export class SerialTerminal {
 		// Best-effort: a missing/failed copy just means the built-in
 		// defaults apply, not a reason to abort the transfer.
 		if (drive !== 'A' && !await this.hasFileOnDrive(drive, 'XMODEM.CFG') && await this.hasFileOnDrive('A', 'XMODEM.CFG')) {
-			await this.copyFileFromA(drive, 'XMODEM.CFG');
+			await this.copyFileFromA('A', drive, 'XMODEM.CFG');
 		}
 
 		return true;
 	}
 
-	private async copyFileFromA(drive: string, fileName: string): Promise<boolean> {
-		this._onActivity.fire(`Copying ${fileName} from A: to ${drive}:…`);
-		this.writeRaw(`PIP ${drive}:=A:${fileName}\r`);
+	private async copyFileFromA(source: string, drive: string, fileName: string): Promise<boolean> {
+		this._onActivity.fire(`Copying ${fileName} from ${source}: to ${drive}:…`);
+		this.writeRaw(`PIP ${drive}:=${source}:${fileName}\r`);
 		await this.waitForIdle(500, 8000);
 
 		const copied = await this.hasFileOnDrive(drive, fileName);
@@ -1286,34 +1356,86 @@ export class SerialTerminal {
 		if (!await this.hasFileOnDrive('A', 'SLIDECPM.COM')) {
 			return false;
 		}
-		return await this.copyFileFromA(drive, 'SLIDECPM.COM');
+		return await this.copyFileFromA('A', drive, 'SLIDECPM.COM');
 	}
 
 	/**
-	 * Confirms REMOTCCP.COM is present on `drive`, bootstrapping it onto A:
-	 * (prompting the user first) and/or copying it from A: via PIP as
-	 * needed - mirroring ensureXModemOnDrive's pattern. Must be called from
-	 * within withExclusiveAccess.
+	 * Confirms SLIDE.COM is present on A:. Unlike SLIDECPM.COM, it only ever
+	 * runs from A: on microBeast (never copied to/launched from another
+	 * drive), and there's no bootstrap/copy support for it either way - it's
+	 * a microBeast-specific program that's expected to already be on the
+	 * device, not something this codebase bundles or knows how to install.
+	 */
+	private async ensureSlideComOnDrive(): Promise<boolean> {
+		return await this.hasFileOnDrive('A', 'SLIDE.COM');
+	}
+
+	/**
+	 * Checks whether SLIDE.COM can be used right now, returning a
+	 * human-readable reason it can't (to surface as an error) or undefined if
+	 * it's fine to proceed. SLIDE.COM is microBeast-only and only runs at
+	 * 19,200 baud - unlike the other transfer applications, its baud rate
+	 * isn't just a setting, it's a hard requirement of the program itself, so
+	 * this is checked against the serial port's actual current baud rather
+	 * than the cpmIde.baudRate setting (which could differ from what the port
+	 * was actually opened with).
+	 */
+	private slideComUnavailableReason(): string | undefined {
+		const deviceType = getDeviceType();
+		if (deviceType !== 'microBeast') {
+			return 'SLIDE.COM is only available on microBeast devices - choose a different transfer application or switch cpmIde.deviceType to microBeast';
+		}
+		if (this.port?.baudRate !== 19200) {
+			return 'SLIDE.COM only works at 19,200 baud - reconnect at 19,200 baud and try again';
+		}
+		return undefined;
+	}
+
+	/**
+	 * The drive REMOTCCP.COM is bootstrapped/looked up on before being
+	 * propagated to wherever a transfer actually needs it - A: for every
+	 * device except microBeast, which needs it on B: instead: microBeast's
+	 * post-install A:WRITE step (see runTargetPostInstallHook) can overwrite
+	 * A:, which would destroy a copy left there before it had a chance to
+	 * propagate anywhere else.
+	 */
+	private remoteCcpHomeDrive(): string {
+		const deviceType = getDeviceType();
+		return deviceType === 'microBeast' ? 'B' : 'A';
+	}
+
+	/**
+	 * Confirms REMOTCCP.COM is present on `drive`, bootstrapping it onto its
+	 * home drive (remoteCcpHomeDrive() - prompting the user first) and/or
+	 * copying it from there via PIP as needed - mirroring
+	 * ensureXModemOnDrive's pattern. Must be called from within
+	 * withExclusiveAccess.
 	 */
 	private async ensureRemoteCcpOnDrive(drive: string): Promise<boolean> {
 		if (await this.hasFileOnDrive(drive, REMOTE_CCP_FILENAME)) {
 			return true;
 		}
-		if (drive !== 'A') {
-			return await this.ensureRemoteCcpOnDrive('A') && await this.copyFileFromA(drive, REMOTE_CCP_FILENAME);
+		const home = this.remoteCcpHomeDrive();
+		if (drive !== home) {
+			return await this.ensureRemoteCcpOnDrive(home) && await this.copyFileFromA(home, drive, REMOTE_CCP_FILENAME);
 		}
 		return await this.bootstrapRemoteCcp();
 	}
 
 	/**
-	 * Installs REMOTCCP.COM onto A: for the first time, after asking the
-	 * user. Tries four methods in order, each falling back to the next on
-	 * failure or missing prerequisites:
+	 * Installs REMOTCCP.COM onto its home drive for the first time, after
+	 * asking the user. Tries up to five methods in order, each falling back
+	 * to the next on failure or missing prerequisites:
 	 *
+	 * 0. SLIDE (installRemoteCcpViaSlide) - microBeast only. SLIDE.COM is
+	 *    normally already on these devices' A:, and its windowed/CRC16
+	 *    transfer is just as resilient as XMODEM without going through
+	 *    RDR: at all - tried first specifically on this device type, ahead
+	 *    of even XMODEM.
 	 * 1. XMODEM (installRemoteCcpViaXmodem) - block checksums and ACK/NAK
 	 *    retries built into the protocol itself, rather than this code
 	 *    having to work around hardware quirks after the fact. Tried first
-	 *    for exactly that reason.
+	 *    on every other device type, for exactly that reason.
 	 * 2. ED (installRemoteCcpViaEd) - inserting text through ED.COM's line
 	 *    editor is driven entirely through the console, the same path
 	 *    DIR/STAT/LOAD/etc. already use reliably throughout this file, so it
@@ -1335,8 +1457,9 @@ export class SerialTerminal {
 			return false;
 		}
 
+		const home = this.remoteCcpHomeDrive();
 		const choice = await vscode.window.showInformationMessage(
-			`${REMOTE_CCP_FILENAME} isn't on A: yet. It replaces the slower CCP-command-driven drive scans, ` +
+			`${REMOTE_CCP_FILENAME} isn't on ${home}: yet. It replaces the slower CCP-command-driven drive scans, ` +
 			`file listings, and transfers with a small resident helper. Install it now over the serial link?`,
 			{ modal: true },
 			'Install'
@@ -1347,12 +1470,23 @@ export class SerialTerminal {
 
 		let installed = false;
 
+		// microBeast only: SLIDE.COM is normally already on A: there, and its
+		// windowed/CRC16 transfer is at least as resilient as XMODEM's own
+		// checksummed blocks while never touching RDR: at all - tried before
+		// even XMODEM specifically on this device type.
+		if (await this.canInstallRemoteCcpViaSlide()) {
+			installed = await this.installRemoteCcpViaSlide();
+			if (!installed) {
+				this._onActivity.fire('SLIDE install failed - trying XMODEM…');
+			}
+		}
+
 		// XMODEM's own block-level checksums and retries are specifically
 		// designed to cope with an unreliable link, rather than this code
 		// having to detect and route around hardware quirks after the fact
 		// like every other method below - tried first for exactly that
 		// reason.
-		if (await this.canInstallRemoteCcpViaXmodem()) {
+		if (!installed && await this.canInstallRemoteCcpViaXmodem()) {
 			installed = await this.installRemoteCcpViaXmodem();
 			if (!installed) {
 				this._onActivity.fire('XMODEM install failed - trying ED…');
@@ -1410,7 +1544,7 @@ export class SerialTerminal {
 			return;
 		}
 
-		this._onActivity.fire('microBeast device - running ALWRITE…');
+		this._onActivity.fire('microBeast device - running A:WRITE…');
 		await this.selectDrive('A');
 		const start = this.inputBuffer.length;
 		this.writeRaw('A:WRITE\r');
@@ -1447,7 +1581,12 @@ export class SerialTerminal {
 
 		const hexFileName = 'REMOTCCP.HEX';
 		const hexLines = toIntelHex(fileContent).split('\r\n').filter(Boolean);
+		const home = this.remoteCcpHomeDrive();
 
+		// PIP.COM/LOAD.COM are looked up on A: (canInstallRemoteCcpViaHex) -
+		// current drive stays A: throughout so the CCP can find them; the
+		// destination drive (A: normally, C: for microBeast) is qualified
+		// explicitly in each command below instead.
 		await this.selectDrive('A');
 
 		// One whole-file PIP transfer reliably ends with this hardware
@@ -1466,7 +1605,7 @@ export class SerialTerminal {
 		for (let i = 0; i < hexLines.length; i++) {
 			const line = hexLines[i] + '\r\n';
 			this._onActivity.fire(`Sending Intel HEX record ${i + 1}/${hexLines.length}${i > 0 ? ' (append)' : ''}…`);
-			if (!await this.pipReceiveLine('A', hexFileName, line, i > 0)) {
+			if (!await this.pipReceiveLine(home, hexFileName, line, i > 0)) {
 				this._onActivity.fire(`Record ${i + 1}/${hexLines.length} transfer could not be verified - leaving ${hexFileName} in place for inspection`);
 				return false;
 			}
@@ -1487,7 +1626,7 @@ export class SerialTerminal {
 			// gets one thorough check below.
 			if (i === 0 || i === 2) {
 				const expectedSoFar = Math.ceil(bytesSoFar / 128);
-				if (!await this.waitForExpectedFileSize('A', hexFileName, expectedSoFar, 3, 400)) {
+				if (!await this.waitForExpectedFileSize(home, hexFileName, expectedSoFar, 3, 400)) {
 					this._onActivity.fire(
 						`${hexFileName} didn't grow as expected after record ${i + 1} - ` +
 						`PIP's [A] append may not be supported on this device - leaving it in place for inspection`
@@ -1503,7 +1642,7 @@ export class SerialTerminal {
 		// that check passing moments earlier) - confirm its actual size
 		// against what was sent before trusting it enough to hand to LOAD.
 		const expectedRecords = Math.ceil(bytesSoFar / 128);
-		if (!await this.waitForExpectedFileSize('A', hexFileName, expectedRecords)) {
+		if (!await this.waitForExpectedFileSize(home, hexFileName, expectedRecords)) {
 			this._onActivity.fire(`${hexFileName} transfer could not be verified - leaving it in place for inspection`);
 			return false;
 		}
@@ -1528,9 +1667,10 @@ export class SerialTerminal {
 	 * called from within withExclusiveAccess.
 	 */
 	private async runLoadForRemoteCcp(hexFileName: string, via: string): Promise<boolean> {
+		const home = this.remoteCcpHomeDrive();
 		this._onActivity.fire(`Converting ${hexFileName} to ${REMOTE_CCP_FILENAME} with LOAD…`);
 		const loadStart = this.inputBuffer.length;
-		this.writeRaw('LOAD REMOTCCP\r');
+		this.writeRaw(`LOAD ${home}:REMOTCCP\r`);
 		await this.waitForPrompt(loadStart, 15000);
 		await this.waitForIdle(500, 5000);
 
@@ -1540,9 +1680,9 @@ export class SerialTerminal {
 			return false;
 		}
 
-		const installed = await this.hasFileOnDrive('A', REMOTE_CCP_FILENAME);
+		const installed = await this.hasFileOnDrive(home, REMOTE_CCP_FILENAME);
 		this._onActivity.fire(installed
-			? `${REMOTE_CCP_FILENAME} installed on A: ${via}`
+			? `${REMOTE_CCP_FILENAME} installed on ${home}: ${via}`
 			: `LOAD did not produce ${REMOTE_CCP_FILENAME}`);
 		return installed;
 	}
@@ -1573,6 +1713,60 @@ export class SerialTerminal {
 		return sent && await this.hasFileOnDrive(drive, fileName);
 	}
 
+	/**
+	 * SLIDE.COM must already be on A:, and the device/connection must
+	 * actually support it (microBeast, 19,200 baud - see
+	 * slideComUnavailableReason()), for the Slide-based install path.
+	 */
+	private async canInstallRemoteCcpViaSlide(): Promise<boolean> {
+		if (this.slideComUnavailableReason()) {
+			return false;
+		}
+		return await this.hasFileOnDrive('A', 'SLIDE.COM');
+	}
+
+	/**
+	 * Installs REMOTCCP.COM onto its home drive via SLIDE.COM's
+	 * windowed/CRC16 transfer protocol - see bootstrapRemoteCcp's comment for
+	 * why this is tried first on microBeast. Requires
+	 * canInstallRemoteCcpViaSlide() to have already confirmed SLIDE.COM's
+	 * prerequisites. Must be called from within withExclusiveAccess.
+	 */
+	private async installRemoteCcpViaSlide(): Promise<boolean> {
+		const comPath = this.context.asAbsolutePath(path.join('remote', 'remotccp.com'));
+		if (!fs.existsSync(comPath)) {
+			this._onActivity.fire(`Remote CCP install failed: couldn't find bundled ${REMOTE_CCP_FILENAME}`);
+			return false;
+		}
+
+		const home = this.remoteCcpHomeDrive();
+		// SLIDE.COM only ever runs from A: - launched via an explicit
+		// "A:SLIDE" so the CCP finds it there regardless of which drive is
+		// current, while `home` stays selected as current so the file it
+		// receives lands there.
+		await this.selectDrive(home);
+		this._onActivity.fire(`Sending ${REMOTE_CCP_FILENAME} via SLIDE…`);
+		this.writeRaw('A:SLIDE\r');
+		// Give the CCP a moment to load and launch SLIDE.COM, and wait for
+		// whatever it prints in response, before starting Slide's own
+		// RDY/RDY handshake - same as sendOneFileVia's SLIDE.COM branch.
+		await this.waitForIdle(300, 3000);
+
+		try {
+			const session = new SerialSession(this.getSerialLink());
+			await sendFiles(session, [comPath], this.traceEnabled());
+		} catch (error) {
+			this._onActivity.fire(`SLIDE send failed: ${error instanceof Error ? error.message : error} - leaving any partial ${REMOTE_CCP_FILENAME} in place for inspection`);
+			return false;
+		}
+
+		const installed = await this.hasFileOnDrive(home, REMOTE_CCP_FILENAME);
+		this._onActivity.fire(installed
+			? `${REMOTE_CCP_FILENAME} installed on ${home}: via SLIDE`
+			: `SLIDE send completed but ${REMOTE_CCP_FILENAME} could not be verified`);
+		return installed;
+	}
+
 	/** XMODEM.COM must already be on A: for the XMODEM-based install path. */
 	private async canInstallRemoteCcpViaXmodem(): Promise<boolean> {
 		return await this.hasFileOnDrive('A', 'XMODEM.COM');
@@ -1597,7 +1791,19 @@ export class SerialTerminal {
 			return false;
 		}
 
-		await this.selectDrive('A');
+		// Unlike the PIP/ED paths below, this project's XMODEM.COM has no
+		// drive-qualified destination argument - it always writes to
+		// whichever drive is current. So when the home drive isn't A: (only
+		// microBeast), XMODEM.COM itself has to be staged there first (via
+		// the same ensure/copy-from-A pattern regular transfers use) before
+		// selecting it as current and running the receive.
+		const home = this.remoteCcpHomeDrive();
+		if (home !== 'A' && !await this.ensureXModemOnDrive(home)) {
+			this._onActivity.fire(`Could not stage XMODEM.COM on ${home}: for the Remote CCP install`);
+			return false;
+		}
+
+		await this.selectDrive(home);
 		this._onActivity.fire(`Sending ${REMOTE_CCP_FILENAME} via XMODEM…`);
 		// No /F here (unlike the regular file-transfer path) - this only
 		// ever runs when REMOTCCP.COM is confirmed missing (see
@@ -1618,9 +1824,9 @@ export class SerialTerminal {
 			return false;
 		}
 
-		const installed = await this.hasFileOnDrive('A', REMOTE_CCP_FILENAME);
+		const installed = await this.hasFileOnDrive(home, REMOTE_CCP_FILENAME);
 		this._onActivity.fire(installed
-			? `${REMOTE_CCP_FILENAME} installed on A: via XMODEM`
+			? `${REMOTE_CCP_FILENAME} installed on ${home}: via XMODEM`
 			: `XMODEM send completed but ${REMOTE_CCP_FILENAME} could not be verified`);
 		return installed;
 	}
@@ -1657,7 +1863,12 @@ export class SerialTerminal {
 
 		const hexFileName = 'REMOTCCP.HEX';
 		const hexLines = toIntelHex(fileContent).split('\r\n').filter(Boolean);
+		const home = this.remoteCcpHomeDrive();
 
+		// ED.COM/LOAD.COM are looked up on A: (canInstallRemoteCcpViaEd) -
+		// current drive stays A: throughout so the CCP can find them; the
+		// destination drive (A: normally, C: for microBeast) is qualified
+		// explicitly in ED's own filename arguments below instead.
 		await this.selectDrive('A');
 
 		// Clear any stale REMOTCCP.HEX left by an earlier failed attempt
@@ -1665,12 +1876,12 @@ export class SerialTerminal {
 		// whatever's already there - unlike leaving a failed attempt's own
 		// files in place for inspection, this is just making sure a new
 		// attempt starts from a clean slate.
-		this.writeRaw(`ERA A:${hexFileName}\r`);
+		this.writeRaw(`ERA ${home}:${hexFileName}\r`);
 		await this.waitForIdle(300, 3000);
 
 		this._onActivity.fire(`Starting ED to insert ${hexFileName}…`);
 		const edStart = this.inputBuffer.length;
-		this.writeRaw(`ED A:${hexFileName}\r`);
+		this.writeRaw(`ED ${home}:${hexFileName}\r`);
 		// ED doesn't print the CCP's "X>" drive prompt while it's running,
 		// so there's no pattern to wait for here - settle instead. Loading
 		// ED.COM itself is real disk I/O, which this hardware has shown can
@@ -1753,9 +1964,10 @@ export class SerialTerminal {
 	 * Must be called from within withExclusiveAccess.
 	 */
 	private async sendRemoteCcpPipReceiveCommand(): Promise<void> {
-		this._onActivity.fire(`Sending PIP command to receive ${REMOTE_CCP_FILENAME} on A:…`);
+		const home = this.remoteCcpHomeDrive();
+		this._onActivity.fire(`Sending PIP command to receive ${REMOTE_CCP_FILENAME} on ${home}:…`);
 		await this.selectDrive('A');
-		this.writeRaw(`PIP A:${REMOTE_CCP_FILENAME}=RDR:[O]\r`);
+		this.writeRaw(`PIP ${home}:${REMOTE_CCP_FILENAME}=CON:[O]\r`);
 	}
 
 	/**
@@ -1776,9 +1988,13 @@ export class SerialTerminal {
 
 		this._onActivity.fire(`Sending ${REMOTE_CCP_FILENAME} (${fileContent.length} bytes) raw…`);
 		const start = this.inputBuffer.length;
-		// One unbroken write, not chunked - see installRemoteCcpViaHex's
-		// matching comment.
-		this.writeRaw(fileContent);
+		// Paced byte-by-byte (writeRawPaced's defaults: 3ms/char, 50ms after
+		// each line) rather than one unbroken write - this raw-PIP path is
+		// already the least reliable of Remote CCP's install methods (see
+		// bootstrapRemoteCcp), and giving PIP time to actually keep up with
+		// each byte (and extra time at each line boundary) has proven more
+		// likely to land intact than blasting the whole file at once.
+		await this.writeRawPaced(fileContent);
 		// Trailing sentinel: harmless whether or not [O] mode needs it, and
 		// the only signal available if it turns out RDR: has no EOF of its
 		// own for PIP to detect completion from.
@@ -1795,9 +2011,10 @@ export class SerialTerminal {
 			return false;
 		}
 
-		const installed = await this.hasFileOnDrive('A', REMOTE_CCP_FILENAME);
+		const home = this.remoteCcpHomeDrive();
+		const installed = await this.hasFileOnDrive(home, REMOTE_CCP_FILENAME);
 		this._onActivity.fire(installed
-			? `${REMOTE_CCP_FILENAME} installed on A:`
+			? `${REMOTE_CCP_FILENAME} installed on ${home}:`
 			: `${REMOTE_CCP_FILENAME} install could not be verified`);
 		return installed;
 	}
@@ -1848,11 +2065,31 @@ export class SerialTerminal {
 	}
 
 	/**
-	 * Manually sends just the PIP receive command - the terminal's "Send PIP
-	 * command" action. Independent of remoteCcpDisabled: triggering this
-	 * action is the user explicitly asking for Remote CCP traffic regardless
-	 * of that toggle.
+	 * Manually triggers a Remote CCP install attempt using whichever install
+	 * method matches the currently selected cpmIde.transferApplication
+	 * (XMODEM.COM -> installRemoteCcpViaXmodem, SLIDE.COM ->
+	 * installRemoteCcpViaSlide) - the terminal's "Send REMOTCCP" action tries
+	 * this first, falling back to the manual PIP-command dialog only if it
+	 * returns false (the selected application has no install path of its
+	 * own, its prerequisites aren't met, or the attempt itself failed).
 	 */
+	async sendRemoteCcpViaSelectedTransferApplication(): Promise<boolean> {
+		if (!this.port?.isOpen) {
+			throw new Error('Serial port not connected');
+		}
+		return await this.withExclusiveAccess('Trying Remote CCP install via the selected transfer application…', async () => {
+			const app = this.getTransferApplication();
+			if (app === 'XMODEM.COM' && await this.canInstallRemoteCcpViaXmodem()) {
+				return await this.installRemoteCcpViaXmodem();
+			}
+			if (app === 'SLIDE.COM' && await this.canInstallRemoteCcpViaSlide()) {
+				return await this.installRemoteCcpViaSlide();
+			}
+			return false;
+		});
+	}
+
+	/** Manually sends just the PIP receive command - the terminal's "Send PIP command" action. */
 	async sendRemoteCcpPipCommand(): Promise<void> {
 		if (!this.port?.isOpen) {
 			throw new Error('Serial port not connected');
@@ -1865,8 +2102,7 @@ export class SerialTerminal {
 	/**
 	 * Manually streams REMOTCCP.COM's bytes raw - the terminal's "SEND
 	 * RemotCCP" action, for a PIP receive already started (typically via
-	 * sendRemoteCcpPipCommand). Independent of remoteCcpDisabled for the
-	 * same reason as sendRemoteCcpPipCommand.
+	 * sendRemoteCcpPipCommand).
 	 */
 	async sendRemoteCcpRaw(): Promise<boolean> {
 		if (!this.port?.isOpen) {
@@ -1945,23 +2181,19 @@ export class SerialTerminal {
 	 * Runs `work` against a live Remote CCP session on `drive`: launches it
 	 * (bootstrapping/propagating REMOTCCP.COM as needed), runs `work`, then
 	 * quits back to the CCP. Returns undefined - instead of throwing - if
-	 * Remote CCP isn't available at all (disabled via the manual toggle, or
-	 * REMOTCCP.COM couldn't be found/installed on `drive`); callers that
-	 * reach this because the user explicitly chose REMOTCCP.COM as their
-	 * transfer application surface that as an error rather than silently
-	 * trying something else. Every call re-checks REMOTCCP.COM's presence
-	 * fresh (no "already known unavailable" caching) - now that transfer
-	 * protocol is an explicit per-transfer choice rather than an implicit
-	 * try-then-fall-back chain, a stale negative from some earlier attempt
-	 * (e.g. while a different protocol was selected) must not keep blocking
-	 * this one; a failure partway through `work` itself still throws
-	 * normally. Must be called from within withExclusiveAccess.
+	 * Remote CCP isn't available at all (REMOTCCP.COM couldn't be
+	 * found/installed on `drive`); callers that reach this because the user
+	 * explicitly chose REMOTCCP.COM as their transfer application surface
+	 * that as an error rather than silently trying something else. Every
+	 * call re-checks REMOTCCP.COM's presence fresh (no "already known
+	 * unavailable" caching) - now that transfer protocol is an explicit
+	 * per-transfer choice rather than an implicit try-then-fall-back chain,
+	 * a stale negative from some earlier attempt (e.g. while a different
+	 * protocol was selected) must not keep blocking this one; a failure
+	 * partway through `work` itself still throws normally. Must be called
+	 * from within withExclusiveAccess.
 	 */
 	private async withRemoteCcp<T>(drive: string, work: (client: RemoteCcpClient) => Promise<T>): Promise<T | undefined> {
-		if (this.remoteCcpDisabled) {
-			return undefined;
-		}
-
 		const client = await this.launchRemoteCcp(drive);
 		if (!client) {
 			return undefined;
@@ -2032,12 +2264,12 @@ export class SerialTerminal {
 		}
 
 		const app = this.getTransferApplication();
-		if (app === 'SLIDECPM.COM') {
+		if (app === 'SLIDECPM.COM' || app === 'SLIDE.COM') {
 			// Slide's receive side (src/slide-ts/recv.ts) only supports
 			// accepting whatever the device decides to push, not requesting
 			// one specific named file the way Remote CCP's FG/XMODEM's /S do
-			// - there's no device-side SLIDECPM.COM protocol support for that
-			// in this codebase.
+			// - there's no device-side SLIDECPM.COM/SLIDE.COM protocol support
+			// for that in this codebase.
 			vscode.window.showErrorMessage(
 				'Slide download not yet implemented - choose REMOTCCP.COM or XMODEM.COM as the transfer application to receive files.'
 			);
@@ -2102,9 +2334,7 @@ export class SerialTerminal {
 						return true;
 					});
 					if (!received) {
-						throw new Error(this.remoteCcpDisabled
-							? 'Remote CCP is disabled (see the Disable REMOTCCP toggle) - choose a different transfer application or re-enable it'
-							: `Could not start a Remote CCP session on drive ${drive}:`);
+						throw new Error(`Could not start a Remote CCP session on drive ${drive}:`);
 					}
 				})
 			);
@@ -2143,7 +2373,7 @@ export class SerialTerminal {
 		}
 
 		const app = this.getTransferApplication();
-		if (app === 'SLIDECPM.COM') {
+		if (app === 'SLIDECPM.COM' || app === 'SLIDE.COM') {
 			vscode.window.showErrorMessage(
 				'Slide download not yet implemented - choose REMOTCCP.COM or XMODEM.COM as the transfer application to receive files.'
 			);
@@ -2232,9 +2462,7 @@ export class SerialTerminal {
 						return true;
 					});
 					if (!received) {
-						throw new Error(this.remoteCcpDisabled
-							? 'Remote CCP is disabled (see the Disable REMOTCCP toggle) - choose a different transfer application or re-enable it'
-							: `Could not start a Remote CCP session on drive ${drive}:`);
+						throw new Error(`Could not start a Remote CCP session on drive ${drive}:`);
 					}
 				})
 			);
@@ -2317,6 +2545,11 @@ export class SerialTerminal {
 
 		if (!this.port?.isOpen) {
 			return drives;
+		}
+
+		const deviceType = getDeviceType();
+		if (deviceType === 'microBeast') {
+			return ['A','B'];
 		}
 
 		this._onActivity.fire('Resyncing console…');
@@ -2414,7 +2647,7 @@ export class SerialTerminal {
 			return undefined;
 		}
 
-		return this.withRemoteCcp('A', async (client) => {
+		return this.withRemoteCcp(this.remoteCcpHomeDrive(), async (client) => {
 			const result = new Map<string, RemoteCcpFile[]>();
 			this._onActivity.fire('Remote CCP: scanning drives…');
 			const drives = await client.driveList((letter) => {

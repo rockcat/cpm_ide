@@ -130,6 +130,8 @@ export class CpmFileExplorer implements vscode.TreeDataProvider<CpmDriveItem | C
 			}
 
 			// Remote CCP unavailable - fall back to the CCP-command approach.
+			// only try A and B, since the rest of the drives are unlikely to be populated and the DIR command is slow and error-prone on drives that don't respond.
+			// (The Remote CCP approach above is much faster and more reliable.)
 			const drives = await this.serialTerminal.scanDrives();
 			const scanned = new Map<string, CpmFile[]>();
 			for (const drive of drives) {

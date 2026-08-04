@@ -3,7 +3,7 @@
   "displayName": "CP/M IDE",
   "icon": "media/icon.png",
   "description": "VS Code extension for CP/M application development with serial terminal and file transfer",
-  "version": "0.3.1",
+  "version": "0.3.4",
   "publisher": "rockcat",
   "engines": {
     "vscode": "^1.80.0"
@@ -409,9 +409,10 @@
             "enum": [
               "REMOTCCP.COM",
               "SLIDECPM.COM",
+              "SLIDE.COM",
               "XMODEM.COM"
             ],
-            "description": "CP/M program used for all auto file transfers (uploads and downloads) - checked for presence on the target/source drive before each transfer. SLIDECPM.COM doesn't support downloads yet."
+            "description": "CP/M program used for all auto file transfers (uploads and downloads) - checked for presence on the target/source drive before each transfer. SLIDECPM.COM and SLIDE.COM don't support downloads yet. SLIDE.COM is microBeast-only, only ever runs from A: (launched as A:SLIDE regardless of the target drive), must already be installed there (no auto-copy like the others), and only works at 19,200 baud."
           },
           "cpmIde.deviceType": {
             "type": "string",
@@ -427,7 +428,7 @@
           "cpmIde.autoWrite": {
             "type": "boolean",
             "default": true,
-            "description": "microBeast only: automatically run ALWRITE after Remote CCP (REMOTCCP.COM) is successfully installed on the device."
+            "description": "microBeast only: automatically run A:WRITE after Remote CCP (REMOTCCP.COM) is successfully installed on the device."
           }
         }
       },

@@ -23,9 +23,9 @@ A VS Code extension for CP/M application development with an integrated serial t
 - Choose the transfer protocol via the **Transfer Application** setting/dropdown:
   - **Remote CCP** (default) - a small custom resident program (see below), the fastest path for scanning drives/files and for all automatic transfers
   - **XMODEM** - the original transfer protocol, plus dedicated manual send/receive commands for diagnosing device-side issues
-  - **Slide** - a windowed, CRC16, multi-file batch transfer protocol for sending several files to a drive in one go
+  - **Slide** - a windowed, CRC16, multi-file batch transfer protocol for sending several files to a drive in one go, via `SLIDECPM.COM`; on microBeast, `SLIDE.COM` can be used the same way if it's already on the device, but only at 19,200 baud
 - Drive/file scanning always tries Remote CCP first and transparently falls back to the slower CCP `DIR`-driven scan if it's unavailable, regardless of which transfer application is selected
-- Automatic `PIP` copy of whichever helper (`REMOTCCP.COM`, `XMODEM.COM`, or `SLIDECPM.COM`) is needed from `A:` to the target drive
+- Automatic `PIP` copy of whichever helper (`REMOTCCP.COM`, `XMODEM.COM`, or `SLIDECPM.COM`) is needed from `A:` (or, for Remote CCP on microBeast, `C:`) to the target drive - `SLIDE.COM` is the one exception, since it must already be on the device
 - Target-drive picker before each upload - only asks when there's genuinely more than one candidate drive (the last scan's detected drives, or the CCP's current drive as a fallback); skips the prompt entirely when there's just one
 
 ### 🐞 Debugging with DDT
@@ -107,7 +107,7 @@ Configure the extension via VS Code settings:
 | `cpmIde.fontFamily` | Terminal font override; leave empty to use the editor font |
 | `cpmIde.terminalSize` | Fixed character grid for the terminal display; font size scales to fit it |
 | `cpmIde.emulation` | Terminal escape-sequence handling: `None` (plain teletype), `Vt52` (default), or `ANSI` |
-| `cpmIde.transferApplication` | Which protocol automatic transfers use: `REMOTCCP.COM` (default), `SLIDECPM.COM`, or `XMODEM.COM` |
+| `cpmIde.transferApplication` | Which protocol automatic transfers use: `REMOTCCP.COM` (default), `SLIDECPM.COM`, `SLIDE.COM`, or `XMODEM.COM`. `SLIDE.COM` is microBeast-only, must already be installed on the device (no auto-copy from `A:`), and only works at 19,200 baud |
 | `cpmIde.deviceType` | Selects device-specific behavior after installing Remote CCP; `Generic` by default, with extra handling for a few named boards (e.g. `microBeast`) |
 | `cpmIde.autoWrite` | microBeast-specific: runs its `A:WRITE` step automatically after Remote CCP install |
 
@@ -161,7 +161,7 @@ If a `Makefile`/`makefile` is found in the workspace root **and** `cpmIde.makeCo
 
 Remote CCP (`remote/remotccp.asm`, see `specs/Remote CCP Specification.md`) is a small resident CP/M program that answers short text commands over the same serial line used for interactive typing - selecting drives, listing files, and streaming file contents as hex-encoded blocks with per-block acknowledgement. It's the fastest and most reliable transfer path, used automatically once installed:
 
-- On first use, if `REMOTCCP.COM` isn't found on `A:`, you're asked whether to install it there via `PIP` reading from `RDR:`
+- On first use, if `REMOTCCP.COM` isn't found on its home drive (`A:`, or `C:` on microBeast), you're asked whether to install it there. Several install methods are tried in order until one works: on microBeast, SLIDE.COM first (normally already on `A:` there), then XMODEM, ED, Intel HEX via `PIP`, and finally raw binary via `PIP` reading from `RDR:`
 - Once present, it's used to scan drives/files (replacing the slower CCP `DIR`-driven scan), and for automatic file transfers when `cpmIde.transferApplication` is set to `REMOTCCP.COM` (the default)
 - If it's ever unavailable (or the install is declined) drive/file scanning transparently falls back to the CCP-command path - no functionality is lost, just some speed; a transfer explicitly set to use it instead reports the failure so you can pick a different transfer application
 
@@ -204,11 +204,12 @@ Remote CCP (`remote/remotccp.asm`, see `specs/Remote CCP Specification.md`) is a
 
 ## File Transfer Protocols
 
-Three transfer protocols are available, selected via `cpmIde.transferApplication` (drive/file scanning always prefers Remote CCP regardless of this setting, falling back to CCP commands only if Remote CCP isn't available):
+Transfer protocols are available, selected via `cpmIde.transferApplication` (drive/file scanning always prefers Remote CCP regardless of this setting, falling back to CCP commands only if Remote CCP isn't available):
 
-1. **Remote CCP** (default) - custom command/response protocol purpose-built for this extension; fastest, with explicit ACKs around real disk I/O (drive selects, file creation/writes) instead of guessed delays. Requires `REMOTCCP.COM` on the device (auto-installed on request).
+1. **Remote CCP** (default) - custom command/response protocol purpose-built for this extension; fastest, with explicit ACKs around real disk I/O (drive selects, file creation/writes) instead of guessed delays. Requires `REMOTCCP.COM` on the device (auto-installed on request). On microBeast, it's bootstrapped/looked up on `C:` instead of `A:`, since microBeast's post-install `A:WRITE` step (see `cpmIde.autoWrite`) can overwrite `A:`.
 2. **XMODEM** - standard 128-byte XMODEM; supports CRC-16 blocks when sending to a device that requests them, checksum-only when receiving from one. Also available directly via the manual send/receive commands. Requires `XMODEM.COM` on the device (auto-copied from `A:` via `PIP` when needed).
-3. **Slide** - a sliding-window (4 frames in flight), 1024-byte-frame, CRC16 protocol for sending multiple files in a single batch. Requires `SLIDECPM.COM` on the device.
+3. **Slide** - a sliding-window (4 frames in flight), 1024-byte-frame, CRC16 protocol for sending multiple files in a single batch. Requires `SLIDECPM.COM` on the device (auto-copied from `A:` via `PIP` when needed).
+4. **SLIDE.COM** - microBeast-only variant of Slide. It only ever runs from `A:` (never copied to or launched from another drive), so it's launched as `A:SLIDE` regardless of which drive is current/being transferred to. Unlike the other three, there's no bootstrap/copy support for it - it must already be on `A:` - and it only works at 19,200 baud.
 
 All directory operations and file transfers are performed transparently, with command output hidden from the interactive terminal unless explicitly requested (e.g. via `cpmIde.enableSerialTrace`).
 

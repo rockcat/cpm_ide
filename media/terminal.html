@@ -74,24 +74,23 @@
       <select id="font-family"></select>
     </div>
   </div>
+  <div class="row" id="device-toolbar" hidden>
+    <div data-device="microBeast" hidden>
+      <label for="auto-write" class="label-auto">
+        <input type="checkbox" id="auto-write" />
+        AutoWrite
+      </label>
+    </div>
+  </div>
   <div class="row">
     <div>
       <button id="connect-btn">Connect</button>
       <button id="disconnect-btn" class="secondary" disabled>Disconnect</button>
       <button id="clear-btn" class="secondary">Clear</button>
       <button id="reset-btn" class="secondary" disabled>Reset</button>
-      <button id="remotccp-disable-btn" class="secondary" title="Prevent Remote CCP (REMOTCCP.COM) from being auto-launched or installed">Disable REMOTCCP</button>
       <button id="remotccp-send-btn" class="secondary" title="Manually drive the Remote CCP install handshake">Send REMOTCCP</button>
     </div>
     <div id="status" class="disconnected">Disconnected</div>
-  </div>
-</div>
-<div class="row" id="device-toolbar" hidden>
-  <div data-device="microBeast" hidden>
-    <label for="auto-write" class="label-auto">
-      <input type="checkbox" id="auto-write" />
-      AutoWrite
-    </label>
   </div>
 </div>
 <hr>

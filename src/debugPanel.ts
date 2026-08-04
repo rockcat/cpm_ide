@@ -78,7 +78,12 @@ export class DebugPanel {
 
 	show() {
 		if (this._panel) {
-			this._panel.reveal(this.targetViewColumn());
+			// No viewColumn argument here (unlike the freshly-created panel
+			// below) - an already-open panel stays wherever the user has it,
+			// rather than snapping back to targetViewColumn() and visibly
+			// jumping/refocusing on every single DDT launch as if it had been
+			// closed and reopened in a new spot.
+			this._panel.reveal();
 			return;
 		}
 
@@ -102,14 +107,24 @@ export class DebugPanel {
 					this.serialTerminal.stepDdt();
 					break;
 				case 'go':
-					this.serialTerminal.goDdt(msg.start, msg.breakpoint);
+					// Go (and Step Over when it's stepping over a CALL - see
+					// debug.js's btn-step-over handler, which sends this same
+					// 'go' message) actually runs the debugged program instead
+					// of single-stepping it - focus the terminal first so any
+					// console input it does right away (a "press any key"
+					// prompt, etc.) has somewhere for the user's next keypress
+					// to go.
+					this.serialTerminalPanel.focusTerminalInput();
+					this.serialTerminal.goDdt(msg.bp1, msg.bp2);
 					break;
 				case 'restart':
 					this.serialTerminal.restartDdt();
 					break;
 				case 'endSession':
+					// Deliberately doesn't dispose the panel - the user may still
+					// want to review the final registers/listing/output, and
+					// Restart or a fresh launch can reuse this same panel.
 					this.serialTerminal.endDdtSession();
-					this._panel?.dispose();
 					break;
 				default:
 					console.warn('[DebugPanel] Unknown message command:', msg.command);

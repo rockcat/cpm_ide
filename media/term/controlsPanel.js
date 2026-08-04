@@ -15,6 +15,15 @@ export const DEVICE_TYPES = ['Generic', 'microBeast', 'Z80 MBC v2', 'Pico CP/M 2
 
 export const TRANSFER_APPS = ['REMOTCCP.COM', 'SLIDECPM.COM','XMODEM.COM'];
 
+// SLIDE.COM is a microBeast-specific program (see serialTerminal.ts's
+// slideComUnavailableReason()) - only offered as a transfer application
+// choice when that's the selected device type.
+export function transferAppsFor(deviceType) {
+  return deviceType === 'microBeast'
+    ? ['REMOTCCP.COM', 'SLIDECPM.COM', 'SLIDE.COM', 'XMODEM.COM']
+    : TRANSFER_APPS;
+}
+
 export function populateSelect(id, values, currentValue, labelFor) {
   const sel = $(id);
   sel.innerHTML = '';
@@ -58,7 +67,7 @@ export function applyInitialSettings(settings) {
   populateSelect('termsize', TERMINAL_SIZES, settings.terminalSize);
   populateSelect('device-type', DEVICE_TYPES, settings.deviceType);
   populateSelect('emulation', EMULATIONS, settings.emulation);
-  populateSelect('transferapplication', TRANSFER_APPS, settings.transferApplication);
+  populateSelect('transferapplication', transferAppsFor(settings.deviceType), settings.transferApplication);
   $('trace-toggle').checked = !!settings.enableSerialTrace;
   $('force-caps').checked = !!settings.forceCapitals;
   $('text-color').value = settings.textColor || '#cccccc';
@@ -84,8 +93,20 @@ export function wireControlListeners({ saveSetting, onTermSizeChange, onEmulatio
     onTermSizeChange();
   });
   $('device-type').addEventListener('change', () => {
-    saveSetting('deviceType', $('device-type').value);
-    updateDeviceToolbar($('device-type').value);
+    const deviceType = $('device-type').value;
+    saveSetting('deviceType', deviceType);
+    updateDeviceToolbar(deviceType);
+
+    // SLIDE.COM only applies to microBeast - refresh the transfer
+    // application options for the new device type, falling back off it
+    // (populateSelect defaults to the list's first entry) if it was
+    // selected and is no longer offered.
+    const previousApp = $('transferapplication').value;
+    populateSelect('transferapplication', transferAppsFor(deviceType), previousApp);
+    if ($('transferapplication').value !== previousApp) {
+      saveSetting('transferApplication', $('transferapplication').value);
+      onTransferApplicationChange($('transferapplication').value);
+    }
   });
   $('emulation').addEventListener('change', () => {
     saveSetting('emulation', $('emulation').value);

@@ -14,6 +14,7 @@ Command | Description | Action
 Q | Quit to CCP | Return ACK and then quit to CCP
 DC | Current Drive | Return current drive letter as a single char then EOT e.g. A\<EOT\>
 DL | Drive List | Calls the BIOS SELDSK entry directly for each drive A-P (HL=0000H means the drive doesn't exist) rather than going through BDOS 14, since some BDOS builds print "BDOS ERR ON x: SELECT" and wait for a keypress on a bad drive instead of just returning. Return all valid drives as a string of letters e.g. ABEF\<EOT\>
+DR | Read-Only Drive List | Uses BDOS 29 DRV_ROVEC's 16-bit bitmap (bit N set means drive N is read-only) to return all read-only drives as a string of letters, same shape as DL, e.g. BD\<EOT\>
 DS\<letter\> | Set Drive | Set to letter using BDOS 14 DRV_SET. Since this can involve real disk I/O (mounting/seeking) that takes a while, an ACK is sent once the select is done - the sender must wait for this before its next command
 DG | Disk get | Return current selected disk letter using BDOS 25 DRV_GET
 FL | List Files | List file on current drive - Use BDOS 17 F_SFIRST and BDOS 18 F_SNEXT streaming the results as filename\|record count\|filename\|record count\|etc. Record count is 2 hex chars

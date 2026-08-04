@@ -7,12 +7,6 @@ let connectedPort = '';
 export function getIsConnected() { return isConnected; }
 export function getIsBusy() { return isBusy; }
 
-export function updateRemoteCcpDisableBtn(disabled) {
-  const btn = $('remotccp-disable-btn');
-  btn.textContent = disabled ? 'Enable REMOTCCP' : 'Disable REMOTCCP';
-  btn.classList.toggle('active', disabled);
-}
-
 export function appendActivity(text) {
   const log = $('activity-log');
   const time = new Date().toLocaleTimeString([], { hour12: false });

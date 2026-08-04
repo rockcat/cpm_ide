@@ -66,6 +66,7 @@ F_WRITE		equ	21	;DE=FCB, A=0 ok
 F_MAKE		equ	22	;DE=FCB
 DRV_GET		equ	25	;returns drive 0-15 in A
 F_DMAOFF	equ	26	;DE=DMA address
+DRV_ROVEC	equ 29  ;returns bitmap of read-only drives
 
 CR	equ	0Dh
 ACK	equ	06h
@@ -147,6 +148,8 @@ DO_D:	inc	hl
 	jp	z,DO_DG
 	cp	'L'
 	jp	z,DO_DL
+	cp	'R'
+	jp	z,DO_DR
 	cp	'S'
 	jp	z,DO_DS
 	jp	MLOOP
@@ -264,6 +267,35 @@ DSC_NEXT:	ld	a,(DRVIDX)
 	ld	e,a
 	ld	c,DRV_SET
 	call	BDOS
+	ld	a,EOT
+	call	SNDBYT
+	jp	MLOOP
+
+;--------------------------------------------------------------
+;DR - read-only drive list: BDOS 29 DRV_ROVEC returns a 16-bit
+;bitmap in HL, bit N set means drive N (A=0) is read-only. Walked
+;bit-by-bit (bit 0 of L first, then the pair shifted right so the
+;next drive's bit lands in the same place) rather than tested
+;directly, since Z80 has no "test bit N of a runtime-computed
+;position" instruction - same letters-then-EOT shape as DL.
+;--------------------------------------------------------------
+DO_DR:	ld	c,DRV_ROVEC
+	call	BDOS
+	xor	a
+	ld	(DRVIDX),a
+DR_LP:	ld	a,l
+	and	1
+	jp	z,DR_NEXT
+	ld	a,(DRVIDX)
+	add	a,'A'
+	call	SNDBYT
+DR_NEXT:	srl	h		;shift the 16-bit HL right by 1 (logical):
+	rr	l		;H's vacated bit0 carries into L's new bit7
+	ld	a,(DRVIDX)
+	inc	a
+	ld	(DRVIDX),a
+	cp	16
+	jp	c,DR_LP
 	ld	a,EOT
 	call	SNDBYT
 	jp	MLOOP

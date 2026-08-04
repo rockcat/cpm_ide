@@ -25,8 +25,14 @@ import { TerminalEmulation } from './term/emulation/base.js';
       screen.render($('output'), !userScrolledUp);
     }
 
-    // Scales the grid's font size to fill the panel's available space - the
-    // same approach terminal.js uses for the main CP/M Terminal.
+    // Scales the grid's font size to fill the panel's available width - unlike
+    // terminal.js's version of this (which also fits screen.rows, since the
+    // main terminal emulates a real fixed-size full-screen app), this panel
+    // only ever shows a handful of short DDT prompt/status lines at a time
+    // (see the file-level comment above), so there's no fixed row count to
+    // fit on screen at once. Sizing by width alone lets the font be as large
+    // as the panel is wide, and #output's own overflow-y:auto (terminal.css)
+    // scrolls through anything taller than the visible area.
     function applyPanelSize() {
       const out = $('output');
       const style = getComputedStyle(out);
@@ -44,13 +50,10 @@ import { TerminalEmulation } from './term/emulation/base.js';
       document.body.removeChild(measurer);
 
       const paddingX = parseFloat(style.paddingLeft) + parseFloat(style.paddingRight);
-      const paddingY = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom);
       const availWidth = out.clientWidth - paddingX;
-      const availHeight = out.clientHeight - paddingY;
 
       const fontSizeForWidth = availWidth / (screen.cols * charWidthPerPx);
-      const fontSizeForHeight = availHeight / (screen.rows * lineHeightRatio);
-      const fontSize = Math.max(6, Math.floor(Math.min(fontSizeForWidth, fontSizeForHeight)));
+      const fontSize = Math.max(6, Math.floor(fontSizeForWidth));
 
       out.style.fontSize = fontSize + 'px';
       out.style.lineHeight = String(lineHeightRatio);
@@ -150,7 +153,13 @@ import { TerminalEmulation } from './term/emulation/base.js';
       setFlag('flag-I', '-');
       $('reg-disasm').textContent = '';
       listingLines = [];
+      listingRows = [];
       $('listing').hidden = true;
+      $('listing').textContent = '';
+      breakpoints = [null, null];
+      savedBreakpoint1 = null;
+      stepOverPending = false;
+      updateBreakpointDisplay();
       regLineBuffer = '';
       screen.clear();
       render();
@@ -163,6 +172,68 @@ import { TerminalEmulation } from './term/emulation/base.js';
     // order; re-resolved against the current PC on every register update so
     // it tracks single-stepping/breakpoints the same way the registers do.
     let listingLines = [];
+
+    // DOM row for each entry in listingLines, in the same order - built once
+    // per 'listing' message (see buildListingRows()) and then just
+    // toggled/scrolled on every register update rather than being torn down
+    // and rebuilt, since the underlying listing doesn't change mid-session.
+    let listingRows = [];
+
+    // Up to two user-set breakpoints, each a 4-digit uppercase hex address
+    // string or null if that slot is unset. This is the single source of
+    // truth for both the Breakpoint 1/2 panel and the markers drawn in the
+    // listing - see updateBreakpointDisplay(). Sent along with every 'go'
+    // message (see the btn-go handler) as DDT's own `G,bp1,bp2` syntax.
+    let breakpoints = [null, null];
+
+    // While a Step Over is running a CALL to completion, slot 0 above holds
+    // the step-over target instead of the user's real breakpoint 1 (see the
+    // btn-step-over handler) - this is what that real value is saved into
+    // so the 'ready' handler can put it back once the step-over completes.
+    let savedBreakpoint1 = null;
+    let stepOverPending = false;
+
+    /** `n` (a listing line's numeric address) as a 4-digit uppercase hex string, e.g. 0x107 -> "0107". */
+    function toHex4(n) {
+      return n.toString(16).toUpperCase().padStart(4, '0');
+    }
+
+    // Reflects `breakpoints` into the Breakpoint 1/2 panel (address text +
+    // clear-button enabled state) and onto the listing (which rows get the
+    // marker dot) - the one place both are kept in sync, called after
+    // anything mutates `breakpoints` or rebuilds the listing rows.
+    function updateBreakpointDisplay() {
+      for (let i = 0; i < 2; i++) {
+        const addr = breakpoints[i];
+        $(`breakpoint-${i + 1}`).textContent = addr ? `${addr}h` : '--';
+        $(`breakpoint-${i + 1}-clear`).disabled = !addr;
+      }
+      listingRows.forEach(row => row.classList.toggle('breakpoint', breakpoints.includes(row.dataset.addr)));
+    }
+
+    /** Sets a breakpoint at `hexAddr` in the first free slot, or clears it if already set there - a no-op if both slots are already taken by other addresses. */
+    function toggleBreakpointAtAddress(hexAddr) {
+      const slot = breakpoints.indexOf(hexAddr);
+      if (slot !== -1) {
+        breakpoints[slot] = null;
+      } else {
+        const freeSlot = breakpoints.indexOf(null);
+        if (freeSlot === -1) return;
+        breakpoints[freeSlot] = hexAddr;
+      }
+      updateBreakpointDisplay();
+    }
+
+    $('breakpoint-1-clear').addEventListener('click', () => { breakpoints[0] = null; updateBreakpointDisplay(); });
+    $('breakpoint-2-clear').addEventListener('click', () => { breakpoints[1] = null; updateBreakpointDisplay(); });
+
+    // Event delegation over the listing container rather than a per-row
+    // listener, since rows are torn down and rebuilt wholesale on every new
+    // listing (see buildListingRows()).
+    $('listing').addEventListener('click', e => {
+      const row = e.target.closest('.listing-line');
+      if (row) toggleBreakpointAtAddress(row.dataset.addr);
+    });
 
     // The listing line whose address is the closest one at-or-before `pc` -
     // not always an exact match, since a multi-byte instruction's PC can
@@ -184,6 +255,37 @@ import { TerminalEmulation } from './term/emulation/base.js';
       return matchIdx;
     }
 
+    // Rebuilds the full set of listing rows (one per listingLines entry) in
+    // the DOM so the whole listing is present at once and can be scrolled
+    // natively, rather than only ever materializing a small window of rows
+    // around the current PC.
+    function buildListingRows() {
+      const container = $('listing');
+      container.textContent = '';
+      listingRows = listingLines.map(line => {
+        const row = document.createElement('div');
+        row.className = 'listing-line';
+        row.textContent = line.text;
+        row.dataset.addr = toHex4(line.address);
+        container.appendChild(row);
+        return row;
+      });
+      updateBreakpointDisplay();
+    }
+
+    // Keeps enough blank space above and below the real listing rows that
+    // even the first/last line in the file can still be scrolled all the
+    // way to the vertical center of the view - without this, the current
+    // line would only be able to approach the center, never reach it, once
+    // fewer than half a screenful of real lines remain above or below it.
+    function applyListingPadding() {
+      const container = $('listing');
+      const half = Math.round(container.clientHeight / 2) + 'px';
+      container.style.paddingTop = half;
+      container.style.paddingBottom = half;
+    }
+    new ResizeObserver(() => applyListingPadding()).observe($('listing'));
+
     function updateListingDisplay(pcHex) {
       const container = $('listing');
       const pc = parseInt(pcHex, 16);
@@ -194,14 +296,21 @@ import { TerminalEmulation } from './term/emulation/base.js';
       }
 
       container.hidden = false;
-      const rows = container.querySelectorAll('.listing-line');
-      const center = Math.floor(rows.length / 2);
-      rows.forEach((row, i) => {
-        const idx = matchIdx - center + i;
-        const line = listingLines[idx];
-        row.textContent = line ? line.text : '';
-        row.classList.toggle('current', idx === matchIdx);
-      });
+      // The ResizeObserver above already keeps padding in sync with the
+      // container's size, but its callback fires asynchronously - calling
+      // this here too avoids a stale (e.g. zero) padding value on the very
+      // first reveal, when hidden -> visible and the first scroll happen in
+      // the same tick.
+      applyListingPadding();
+      listingRows.forEach((row, i) => row.classList.toggle('current', i === matchIdx));
+
+      // Re-center the current line in the scrollable viewport on every step,
+      // rather than only scrolling it into view when it's off-screen - this
+      // is what keeps the PC pinned to the middle of the window as it moves.
+      const row = listingRows[matchIdx];
+      if (row) {
+        container.scrollTop = row.offsetTop - (container.clientHeight - row.offsetHeight) / 2;
+      }
     }
 
     // Serial chunks can split this line across multiple 'data' messages, so
@@ -244,27 +353,46 @@ import { TerminalEmulation } from './term/emulation/base.js';
       return ((pc + 3) & 0xffff).toString(16).toUpperCase().padStart(4, '0');
     }
 
+    // Drops any breakpoint that sits at the current PC before a 'go' -
+    // DDT would otherwise stop again immediately, right back where
+    // execution already is, since that's the very address it's about to
+    // resume from.
+    function breakpointsForGo() {
+      const pc = $('reg-P').textContent;
+      return breakpoints.map(bp => (bp && bp !== pc) ? bp : null);
+    }
+
     $('btn-step').addEventListener('click', () => {
       setStepButtonsEnabled(false);
       vscode.postMessage({ command: 'step' });
     });
     $('btn-go').addEventListener('click', () => {
       setStepButtonsEnabled(false);
-      vscode.postMessage({ command: 'go' });
+      const [bp1, bp2] = breakpointsForGo();
+      vscode.postMessage({ command: 'go', bp1, bp2 });
     });
 
     // Same as Step, unless the instruction at the current PC (from the most
     // recent register-line parse) is a CALL - then it runs the call to
-    // completion with a breakpoint right after it, instead of stepping
-    // into the callee one instruction at a time.
+    // completion with a breakpoint right after it, instead of stepping into
+    // the callee one instruction at a time. That breakpoint borrows slot 0
+    // (bp1) for the duration of the run - swapping the user's own
+    // breakpoint 1 out (saved in savedBreakpoint1) if one was set - since
+    // the 'go' message always sends whatever's currently in `breakpoints`;
+    // it's put back once the 'ready' handler below sees the run finish.
     $('btn-step-over').addEventListener('click', () => {
       setStepButtonsEnabled(false);
       const disasm = $('reg-disasm').textContent;
       const pc = $('reg-P').textContent;
       if (isCallInstruction(disasm)) {
-        const breakpoint = addressAfterCall(pc);
-        if (breakpoint) {
-          vscode.postMessage({ command: 'go', start: pc, breakpoint });
+        const stepOverTarget = addressAfterCall(pc);
+        if (stepOverTarget) {
+          savedBreakpoint1 = breakpoints[0];
+          stepOverPending = true;
+          breakpoints[0] = stepOverTarget;
+          updateBreakpointDisplay();
+          const [bp1, bp2] = breakpointsForGo();
+          vscode.postMessage({ command: 'go', bp1, bp2 });
           return;
         }
       }
@@ -301,8 +429,15 @@ import { TerminalEmulation } from './term/emulation/base.js';
         }
       } else if (msg.command === 'listing') {
         listingLines = msg.lines || [];
+        buildListingRows();
         updateListingDisplay($('reg-P').textContent);
       } else if (msg.command === 'ready') {
+        if (stepOverPending) {
+          breakpoints[0] = savedBreakpoint1;
+          savedBreakpoint1 = null;
+          stepOverPending = false;
+          updateBreakpointDisplay();
+        }
         setStepButtonsEnabled(true);
       } else if (msg.command === 'reset') {
         resetDisplay();

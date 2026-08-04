@@ -80,7 +80,7 @@ async function pickTargetDrive(terminal: SerialTerminal): Promise<string | undef
  * whatever drive the CCP is currently sitting on rather than prompting - the
  * point of a multi-file send is firing them all off in one go, and grouping
  * them onto one drive is also what lets SerialTerminal's shared-session
- * batching (one REMOTCCP.COM/SLIDECPM.COM launch for the whole batch) apply.
+ * batching (one REMOTCCP.COM/SLIDECPM.COM/SLIDE.COM launch for the whole batch) apply.
  */
 async function resolveTargetDrive(terminal: SerialTerminal, fileCount: number): Promise<string | undefined> {
 	if (fileCount > 1) {

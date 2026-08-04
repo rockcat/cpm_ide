@@ -59,10 +59,6 @@ button.secondary {
   color: var(--vscode-button-secondaryForeground);
 }
 button.secondary:hover:not(:disabled) { background: var(--vscode-button-secondaryHoverBackground); }
-button.secondary.active {
-  background: var(--vscode-inputValidation-warningBackground, #7a5f00);
-  color: var(--vscode-inputValidation-warningForeground, #fff);
-}
 button:disabled { opacity: 0.45; cursor: default; }
 #refresh-btn { padding: 2px 6px; flex-shrink: 0; }
 hr { border: none; border-top: 1px solid var(--vscode-panel-border); margin: 1px 0; }

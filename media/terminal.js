@@ -4,15 +4,57 @@ import { createEmulation } from './term/emulation/index.js';
 import { applyInitialSettings, wireControlListeners, getInitialPort } from './term/controlsPanel.js';
 import { initFontPicker } from './term/fontPicker.js';
 import {
-  appendActivity, setConnected, setBusy, updateRemoteCcpDisableBtn,
+  appendActivity, setConnected, setBusy,
   getIsConnected, getIsBusy,
 } from './term/connectionUi.js';
+
+function playWebviewBeep() {
+    try {
+        // 1. Create the audio context
+        const AudioContext = window.AudioContext || window.webkitAudioContext;
+        const ctx = new AudioContext();
+        
+        // 2. Create an oscillator node (generates a sound wave)
+        const osc = ctx.createOscillator();
+        const gainNode = ctx.createGain();
+        
+        osc.type = 'sine';       // Clean sound type
+        osc.frequency.value = 440; // Frequency in Hz (A4 note)
+        
+        // 3. Connect nodes to speakers
+        osc.connect(gainNode);
+        gainNode.connect(ctx.destination);
+        
+        // 4. Play immediately and fade out quickly (0.1 seconds long)
+        osc.start(ctx.currentTime);
+        gainNode.gain.setValueAtTime(1, ctx.currentTime);
+        gainNode.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.1);
+        osc.stop(ctx.currentTime + 0.1);
+        
+    } catch (error) {
+        console.error("Audio playback failed:", error);
+    }
+}
 
 (function () {
   'use strict';
   try {
     const vscode = acquireVsCodeApi();
     console.log('[Webview] Initialized, vscode API available');
+
+    // Tells the extension host it's now safe to send 'connected'/'init' -
+    // sent as early as possible (right after acquiring the API, before any
+    // other setup below) since postMessage from the host doesn't queue for a
+    // receiver that isn't listening yet: sending those messages right after
+    // `webview.html = ...` instead (as the host used to) raced this script's
+    // own load/parse/import-resolution, and losing that race is what left
+    // the dropdowns unpopulated. This alone is enough of a signal even
+    // though window.addEventListener('message', ...) below is registered a
+    // few lines later still - by the time the host receives this (a genuine
+    // cross-process round trip) and reacts, this script's own remaining
+    // synchronous setup, including that listener registration, has already
+    // completed.
+    vscode.postMessage({ command: 'ready' });
 
     function saveSetting(key, value) {
       vscode.postMessage({ command: 'updateSetting', key, value });
@@ -26,6 +68,8 @@ import {
       const out = $('output');
       out.classList.add('flash');
       setTimeout(() => out.classList.remove('flash'), 100);
+      // make a beep
+      playWebviewBeep();
     }
 
     const screen = new ScreenBuffer();
@@ -157,13 +201,6 @@ import {
 
     $('clear-btn').addEventListener('click', () => clearScreen());
 
-    let remoteCcpDisabled = false;
-    $('remotccp-disable-btn').addEventListener('click', () => {
-      remoteCcpDisabled = !remoteCcpDisabled;
-      updateRemoteCcpDisableBtn(remoteCcpDisabled);
-      vscode.postMessage({ command: 'setRemoteCcpDisabled', value: remoteCcpDisabled });
-    });
-
     $('remotccp-send-btn').addEventListener('click', () => {
       vscode.postMessage({ command: 'sendRemoteCcp' });
     });
@@ -219,11 +256,11 @@ import {
         e.preventDefault();
         sendPastedText();
       } else if (SPECIAL_KEYS.includes(e.key) && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault();
         // Arrow/Home/End/etc - encoding is emulation-specific (VT52 vs ANSI
         // cursor-key sequences differ); None emulation sends nothing.
         const seq = emulation.encodeKey(e.key, e);
         if (seq) {
-          e.preventDefault();
           sendToDevice(seq);
         }
       } else if (e.ctrlKey && !e.metaKey && !e.altKey && /^[a-zA-Z]$/.test(e.key)) {
@@ -284,8 +321,6 @@ import {
           });
           resizeGrid();
           applyTerminalSize();
-          remoteCcpDisabled = !!msg.remoteCcpDisabled;
-          updateRemoteCcpDisableBtn(remoteCcpDisabled);
           break;
         case 'portList': {
           const sel = $('port');
@@ -326,6 +361,14 @@ import {
           break;
         case 'busy':
           setBusy(msg.busy);
+          break;
+        case 'focusTerminal':
+          // Sent when a DDT Step Over/Go starts actually running the
+          // debugged program (see debugPanel.ts) - it may do its own
+          // console I/O right away, so keystrokes need to reach the device
+          // immediately rather than landing wherever focus happened to be
+          // (e.g. still on the DEBUG panel, which has nothing to type into).
+          $('output').focus();
           break;
         case 'activity':
           appendActivity(msg.text);
