@@ -5,6 +5,8 @@ const ACK = 0x06;
 const NAK = 0x15;
 const ETX = 0x03;
 const EOT = 0x04;
+const CR = 0x0d;
+const LF = 0x0a;
 
 export interface RemoteCcpFile {
 	name: string;
@@ -86,15 +88,16 @@ export class RemoteCcpClient {
 
 	/**
 	 * Waits for REMOTCCP.COM to actually be up and reads its startup version
-	 * byte. `preambleLength` is the exact byte count of everything that
-	 * precedes it - the console's character-echo of the launch command
-	 * itself (including its terminating CR) plus the CCP's own trailing
-	 * CR/LF, printed just before the .COM actually starts running (see
-	 * launchRemoteCcp()'s comment for why both are entirely predictable).
-	 * Since the exact count is known, this simply reads that many bytes and
-	 * discards them, then reads and returns the next one - no need to guess
-	 * when a "quiet" gap means the version byte has arrived, or to wait any
-	 * further once it's actually in hand.
+	 * byte. `echoLength` is the exact byte count of the console's
+	 * character-echo of the launch command itself (including its
+	 * terminating CR) - entirely predictable, since it's just what was
+	 * typed being reflected back (see launchRemoteCcp()'s comment). What the
+	 * CCP prints after that and before actually running the .COM isn't as
+	 * fixed - some CCPs emit a single CR/LF, others more - so rather than
+	 * also hardcoding that count (which desyncs the version-byte read by
+	 * however many bytes the guess is off by), every CR/LF byte after the
+	 * echo is skipped and the first byte that isn't one of those is taken as
+	 * the version byte.
 	 *
 	 * Each byte gets the full `timeoutMs` budget individually (not shared
 	 * across all of them) - loading the .COM off disk before the CCP's
@@ -105,9 +108,13 @@ export class RemoteCcpClient {
 	 * Returns the version byte (BDOS function 12's L register, e.g. 0x22
 	 * for CP/M 2.2).
 	 */
-	async waitForStartup(preambleLength: number, timeoutMs = 40000): Promise<number> {
-		await this.readBytes(preambleLength, timeoutMs);
-		return this.readByte(timeoutMs);
+	async waitForStartup(echoLength: number, timeoutMs = 40000): Promise<number> {
+		await this.readBytes(echoLength, timeoutMs);
+		let byte: number;
+		do {
+			byte = await this.readByte(timeoutMs);
+		} while (byte === CR || byte === LF);
+		return byte;
 	}
 
 	async quit(): Promise<void> {

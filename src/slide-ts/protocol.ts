@@ -1,5 +1,6 @@
 import SerialPort from "serialport";
 import type { SerialLink } from "../xmodem.js";
+import { formatHexDump } from "../hexDump.js";
 
 export const SOF = 0x01;
 export const CTRL_ACK = 0x06;
@@ -88,8 +89,14 @@ export function buildHeaderFrame(filename: string, filesize: number): Buffer {
  * the terminal and instead builds a SerialSession directly from its shared
  * SerialLink - a second, independently-opened SerialPort on the same path
  * would simply fail (or steal the port out from under the terminal).
+ *
+ * `debug` logs every raw byte written/received as a timestamped hex dump
+ * (same format as the VS Code extension's own serial trace log), so a
+ * failing transfer can be compared byte-for-byte against what the Z80 side
+ * actually put on the wire - not just the parsed frames/errors slide-ts
+ * itself prints.
  */
-export async function openSerial(path: string, baud: number): Promise<SerialSession> {
+export async function openSerial(path: string, baud: number, debug = false): Promise<SerialSession> {
   // Two-argument (path, options) form, matching the serialport@9 typings
   // this project is built against (the single options-object-with-path
   // form is a later serialport-major API).
@@ -114,6 +121,9 @@ export async function openSerial(path: string, baud: number): Promise<SerialSess
 
   const listeners = new Set<(data: Buffer) => void>();
   port.on("data", (chunk: Buffer) => {
+    if (debug) {
+      console.error(`[${new Date().toISOString()}] RX ${formatHexDump(chunk)}`);
+    }
     for (const listener of listeners) {
       listener(chunk);
     }
@@ -121,6 +131,9 @@ export async function openSerial(path: string, baud: number): Promise<SerialSess
 
   const link: SerialLink = {
     write: (data: Buffer) => {
+      if (debug) {
+        console.error(`[${new Date().toISOString()}] TX ${formatHexDump(data)}`);
+      }
       port.write(data);
     },
     onData: (listener: (data: Buffer) => void) => {

@@ -12,5 +12,9 @@ CPM IDE Specification.md
 remote/*.asm
 remote/*.lst
 remote/*.rom
+remote/drivetest.*
+remote/fltest.*
+remote/miniedit.*
+
 PAT
 screenshots/

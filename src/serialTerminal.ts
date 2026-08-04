@@ -2150,16 +2150,14 @@ export class SerialTerminal {
 		this.writeRaw(command);
 
 		try {
-			// Everything before the version byte is entirely predictable:
-			// the console's character-echo of `command` itself (it's
-			// listening from before the command was even sent, so none of
-			// that echo can be missed), plus the CCP's own trailing CR/LF
-			// printed just before the .COM actually starts running. See
-			// waitForStartup() - reading exactly that many bytes needs no
-			// waiting once the version byte, the very next one, is in hand,
-			// unlike guessing from a "quiet" gap that may as well wait
-			// again after every byte just to be sure nothing more is coming.
-			const versionByte = await client.waitForStartup(command.length + 2, 40000);
+			// The character-echo of `command` itself is entirely predictable
+			// (it's listening from before the command was even sent, so
+			// none of it can be missed) - everything after that up to the
+			// version byte (the CCP's own trailing CR/LF before the .COM
+			// actually starts running) is skipped dynamically by
+			// waitForStartup() instead of assuming a fixed count, since not
+			// every CCP prints the same number of bytes there.
+			const versionByte = await client.waitForStartup(command.length, 40000);
 			this.recordCpmVersion(versionByte);
 			return client;
 		} catch (error) {

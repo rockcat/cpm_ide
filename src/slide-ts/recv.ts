@@ -30,7 +30,7 @@ export async function recvSession(
   console.log("");
 
   await fs.mkdir(outputDir, { recursive: true });
-  const session = await openSerial(portName, baud);
+  const session = await openSerial(portName, baud, debug);
 
   try {
     await handshakeAsReceiver(session, debug);
