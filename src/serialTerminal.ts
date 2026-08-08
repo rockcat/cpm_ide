@@ -927,7 +927,11 @@ export class SerialTerminal {
 			// any of it, aborting almost immediately with "ABORT: Sync
 			// fail" - a device-side device-mapping mismatch, not a timing
 			// issue, and no amount of getting our own timing right fixes it.
-			this.writeRaw(`XMODEM ${remoteFileName} /F /R /X0\r`);
+			// this.writeRaw(`XMODEM ${remoteFileName} /F /R /X0\r`);
+
+			// update remove /F for better compatibility and also becasue we know file isn't ther or we woudln't need to send
+			this.writeRaw(`XMODEM ${remoteFileName} /R /X0\r`);
+
 			// No fixed delay here before starting to listen - XModem.send()'s
 			// own sync wait (waitForIsolatedByte(), a generous 60s budget)
 			// already accounts for however long the CCP takes to load and
